@@ -414,9 +414,10 @@ defmodule State.Server do
     |> State.all(opts)
   end
 
-  def log_parse_error(module, e) do
+  def log_parse_error(module, e, trace) do
     _ = Logger.error("#{module} error parsing binary state: #{inspect(e)}")
     _ = Logger.error(Exception.format(:error, e))
+    _ = Logger.error(Exception.format_stacktrace(trace))
     nil
   end
 
@@ -479,7 +480,7 @@ defmodule State.Server do
       try do
         parser.parse(binary)
       rescue
-        e -> log_parse_error(module, e)
+        e -> log_parse_error(module, e, __STACKTRACE__)
       end
     end)
   end
