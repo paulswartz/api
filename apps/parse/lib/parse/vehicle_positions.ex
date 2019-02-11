@@ -9,26 +9,33 @@ defmodule Parse.VehiclePositions do
   alias Parse.Realtime.FeedMessage
   import Parse.Helpers
 
+  def parse("{" <> _ = blob) do
+    Parse.VehiclePositions.Json.parse(blob)
+  end
+
   def parse(blob) do
     blob
     |> FeedMessage.decode()
-    |> (fn message -> message.entity end).()
-    |> Stream.map(fn entity -> entity.vehicle end)
+    |> Map.get(:entity)
+    |> Stream.map(& &1.vehicle)
     |> Stream.map(&parse_vehicle_update/1)
   end
 
   def parse_vehicle_update(update) do
+    trip = update.trip
+    position = update.position
+
     %Vehicle{
       id: optional_field_copy(update.vehicle, :id),
-      trip_id: optional_field_copy(update.trip, :trip_id),
-      route_id: optional_field_copy(update.trip, :route_id),
-      direction_id: update.trip && update.trip.direction_id,
+      trip_id: optional_field_copy(trip, :trip_id),
+      route_id: optional_field_copy(trip, :route_id),
+      direction_id: optional_field_copy(trip, :direction_id),
       stop_id: optional_copy(update.stop_id),
       label: optional_field_copy(update.vehicle, :label),
-      latitude: update.position && update.position.latitude,
-      longitude: update.position && update.position.longitude,
-      bearing: update.position && update.position.bearing,
-      speed: update.position && update.position.speed,
+      latitude: optional_field_copy(position, :latitude),
+      longitude: optional_field_copy(position, :longitude),
+      bearing: optional_field_copy(position, :bearing),
+      speed: optional_field_copy(position, :speed),
       current_status: current_status(update.current_status),
       current_stop_sequence: update.current_stop_sequence,
       updated_at: unix_to_local(update.timestamp)
