@@ -14,6 +14,8 @@ defmodule State.Trip.Added do
   @impl GenServer
   def init(state) do
     subscribe({:new_state, State.Prediction})
+    subscribe({:new_state, State.StopsOnRoute})
+    subscribe({:new_state, State.Shape})
     super(state)
   end
 
