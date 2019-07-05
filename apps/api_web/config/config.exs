@@ -11,7 +11,11 @@ config :api_web, ApiWeb.Endpoint,
   root: Path.dirname(__DIR__),
   secret_key_base: "v1EHfW07QPr8ai7bi0hooadtBorROPNjhSWx7CGv7AiCOhEyGoeT1jagMTNCE3PU",
   render_errors: [accepts: ~w(json html)],
-  http: [compress: true, protocol_options: [idle_timeout: 86_400_000]]
+  http: [
+    compress: true,
+    protocol_options: [idle_timeout: 86_400_000],
+    transport_options: [num_acceptors: 200]
+  ]
 
 config :api_web, :rate_limiter,
   limiter: ApiWeb.RateLimiter.ETS,
