@@ -48,6 +48,14 @@ defmodule ApiWeb do
       _ ->
         :ok
     end
+
+    with binary when is_binary(binary) <- System.get_env("NUM_ACCEPTORS"),
+         {num_acceptors, ""} <- Integer.parse(binary) do
+      env = Application.get_env(:api_web, ApiWeb.Endpoint)
+      env = put_in(env[:http][:transport_options][:num_acceptors], num_acceptors)
+      _ = Logger.info(fn -> "Setting num_acceptors to #{num_acceptors}" end)
+      Application.put_env(:api_web, ApiWeb.Endpoint, env)
+    end
   end
 
   @doc """
