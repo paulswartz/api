@@ -35,11 +35,10 @@ defmodule State.Server.Query do
 
   defmodule Result do
     @moduledoc false
-    @enforce_keys [:module, :recordable, :key_index]
+    @enforce_keys [:module, :recordable]
     defstruct [
       :module,
       :recordable,
-      :key_index,
       matches: [],
       selectors: [],
       seen: MapSet.new(),
@@ -52,8 +51,7 @@ defmodule State.Server.Query do
   defp do_query(module, qs) do
     result = %Result{
       module: module,
-      recordable: module.recordable(),
-      key_index: module.key_index()
+      recordable: module.recordable()
     }
 
     Enum.reduce(qs, result, &accumulate/2)
@@ -205,14 +203,14 @@ defimpl Enumerable, for: State.Server.Query.Result do
   end
 
   def reduce(%{matches: [{index, [index_head | index_tail], struct} | tail]} = result, cont, fun) do
-    %{module: module, recordable: recordable, key_index: key_index} = result
+    %{module: module, recordable: recordable} = result
 
     record =
       struct
       |> Map.put(index, index_head)
       |> recordable.to_record()
 
-    queued = Server.by_index_match(record, module, {index, key_index}, [])
+    queued = Server.by_index_match(record, module, index, [])
 
     result = %{result | matches: [{index, index_tail, struct} | tail], queued: queued}
     reduce(result, cont, fun)
