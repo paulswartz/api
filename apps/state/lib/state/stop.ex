@@ -62,10 +62,12 @@ defmodule State.Stop do
   end
 
   def by_family_ids(ids) do
-    State.Stop.Cache.query([
-      %{id: ids},
-      %{parent_station: ids}
-    ])
+    Enum.to_list(
+      State.Stop.Cache.query([
+        %{id: ids},
+        %{parent_station: ids}
+      ])
+    )
   end
 
   def by_parent_station(id) when is_binary(id) do

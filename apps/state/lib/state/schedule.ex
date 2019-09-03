@@ -86,7 +86,7 @@ defmodule State.Schedule do
       stop_sequence: [prediction.stop_sequence]
     }
     |> query()
-    |> List.first()
+    |> Enum.at(0)
   end
 
   def schedule_for(%Model.Prediction{}) do
@@ -155,7 +155,8 @@ defmodule State.Schedule do
     trip_ids =
       filters
       |> Map.take(keys)
-      |> State.Trip.filter_by()
+      |> State.Trip.build_query()
+      |> State.Trip.query_both()
       |> Enum.map(& &1.id)
 
     filters = Map.drop(filters, keys)
@@ -254,7 +255,7 @@ defmodule State.Schedule do
     do_time_filter(schedules, 0, max)
   end
 
-  defp do_post_search_filter(schedules, _), do: schedules
+  defp do_post_search_filter(schedules, _), do: Enum.to_list(schedules)
 
   # Filters schedules to see if they fit within a time window
   @spec do_time_filter([Schedule.t()], min_time, max_time) :: [Schedule.t()]
