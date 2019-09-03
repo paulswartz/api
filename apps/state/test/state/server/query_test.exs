@@ -23,58 +23,62 @@ defmodule State.Server.QueryTest do
   describe "query/2" do
     setup :start_server
 
+    def query_list(module, qs) do
+      Enum.to_list(query(module, qs))
+    end
+
     test "returns no items without a query" do
       Server.new_state([%Example{}])
-      assert query(Server, %{}) == []
+      assert query_list(Server, %{}) == []
     end
 
     test "returns no items with an empty query" do
       Server.new_state([%Example{}])
-      assert query(Server, %{id: []}) == []
+      assert query_list(Server, %{id: []}) == []
     end
 
     test "given a query on the index, returns that item" do
       items = gen_items(2)
       Server.new_state(items)
 
-      assert [%Example{id: 1}] = query(Server, %{id: [1]})
-      assert [%Example{id: 1}] = query(Server, %{id: [0, 1]})
-      assert [] = query(Server, %{id: [0]})
+      assert [%Example{id: 1}] = query_list(Server, %{id: [1]})
+      assert [%Example{id: 1}] = query_list(Server, %{id: [0, 1]})
+      assert [] = query_list(Server, %{id: [0]})
     end
 
     test "given multiple queries, combines them" do
       items = gen_items(2)
       Server.new_state(items)
 
-      assert [%Example{id: 1}] = query(Server, %{id: [1], data: [1]})
-      assert [%Example{id: 1}] = query(Server, %{id: [1], data: [1, :other]})
-      assert [%Example{id: 1}] = query(Server, %{id: [0, 1], data: [1, :other]})
-      assert [] = query(Server, %{id: [0], data: [1]})
-      assert [] = query(Server, %{id: [1], data: [:other]})
+      assert [%Example{id: 1}] = query_list(Server, %{id: [1], data: [1]})
+      assert [%Example{id: 1}] = query_list(Server, %{id: [1], data: [1, :other]})
+      assert [%Example{id: 1}] = query_list(Server, %{id: [0, 1], data: [1, :other]})
+      assert [] = query_list(Server, %{id: [0], data: [1]})
+      assert [] = query_list(Server, %{id: [1], data: [:other]})
     end
 
     test "can query against non-key indices" do
       items = gen_items(2)
       Server.new_state(items)
 
-      assert [%Example{id: 1}] = query(Server, %{other_key: [10]})
-      assert [%Example{id: 1}] = query(Server, %{other_key: [10], data: [1]})
+      assert [%Example{id: 1}] = query_list(Server, %{other_key: [10]})
+      assert [%Example{id: 1}] = query_list(Server, %{other_key: [10], data: [1]})
     end
 
     test "can query against non-index values" do
       items = gen_items(2)
       Server.new_state(items)
 
-      assert [%Example{id: 1}] = query(Server, %{data: [1]})
-      assert [%Example{id: 1}] = query(Server, %{data: [0, 1]})
-      assert [] = query(Server, %{data: [0]})
+      assert [%Example{id: 1}] = query_list(Server, %{data: [1]})
+      assert [%Example{id: 1}] = query_list(Server, %{data: [0, 1]})
+      assert [] = query_list(Server, %{data: [0]})
     end
 
     test "can accept multiple queries" do
       items = gen_items(3)
       Server.new_state(items)
 
-      assert [] = query(Server, [])
+      assert [] = query_list(Server, [])
 
       result = query(Server, [%{id: [1]}, %{id: [2]}])
       assert result |> Enum.map(& &1.id) |> Enum.sort() == [1, 2]

@@ -20,8 +20,6 @@ defmodule State.Server.Query do
   @type recordable :: struct
   @type index :: atom
 
-  alias State.Server
-
   @spec query(module, q | [q]) :: [recordable] when q: map, recordable: struct
   def query(module, %{} = q) when is_atom(module) do
     do_query(module, [q])
@@ -37,38 +35,45 @@ defmodule State.Server.Query do
 
   defmodule Result do
     @moduledoc false
-    @enforce_keys [:module]
-    defstruct [:module, matches: [], selectors: []]
+    @enforce_keys [:module, :recordable, :key_index]
+    defstruct [
+      :module,
+      :recordable,
+      :key_index,
+      matches: [],
+      selectors: [],
+      seen: MapSet.new(),
+      queued: []
+    ]
   end
 
   alias __MODULE__.Result
 
   defp do_query(module, qs) do
-    qs
-    |> Enum.reduce(%Result{module: module}, &accumulate/2)
-    |> finalize()
+    result = %Result{
+      module: module,
+      recordable: module.recordable(),
+      key_index: module.key_index()
+    }
+
+    Enum.reduce(qs, result, &accumulate/2)
   end
 
-  def accumulate(q, %Result{module: module} = result) when map_size(q) > 0 do
+  def accumulate(q, %Result{module: module, recordable: recordable} = result)
+      when map_size(q) > 0 do
     {is_db_index?, index} = first_index(module.indices(), q)
     rest = Map.delete(q, index)
-    recordable = module.recordable()
 
     case {is_db_index?,
           Enum.reduce_while(rest, {recordable.filled(:_), [], 1}, &build_struct_and_guards/2)} do
       {true, {struct, [], _}} ->
         index_values = Map.get(q, index)
 
-        matches =
-          for record <- records_from_struct_and_values(struct, index, index_values) do
-            Server.by_index_match(record, module, {index, module.key_index()}, [])
-          end
-
-        %{result | matches: matches ++ result.matches}
+        %{result | matches: [{index, index_values, struct} | result.matches]}
 
       {_, {struct, guards, _}} ->
         # put shorter guards at the front
-        guards = Enum.sort(guards)
+        guards = :lists.usort(guards)
 
         index_values = Map.get(q, index)
 
@@ -92,28 +97,11 @@ defmodule State.Server.Query do
     result
   end
 
-  def finalize(%Result{selectors: [], matches: matches}) do
-    flat_results(matches)
-  end
-
-  def finalize(%Result{module: module, selectors: selectors, matches: matches}) do
-    selected = Server.select_with_selectors(module, List.flatten(selectors))
-    flat_results([selected | matches])
-  end
-
   defp records_from_struct_and_values(%{__struct__: recordable} = struct, index, index_values) do
     for value <- index_values do
       struct
       |> Map.put(index, value)
       |> recordable.to_record()
-    end
-  end
-
-  defp flat_results(results) do
-    for list <- results,
-        r <- list,
-        uniq: true do
-      r
     end
   end
 
@@ -178,5 +166,70 @@ defmodule State.Server.Query do
   # build query variables at compile time
   for i <- 1..20 do
     defp query_variable(unquote(i)), do: unquote(String.to_atom("$#{i}"))
+  end
+end
+
+defimpl Enumerable, for: State.Server.Query.Result do
+  alias State.Server
+
+  def count(_result) do
+    {:error, __MODULE__}
+  end
+
+  def member?(_result, _element) do
+    {:error, __MODULE__}
+  end
+
+  def slice(_result) do
+    {:error, __MODULE__}
+  end
+
+  def reduce(_result, {:halt, acc}, _fun) do
+    {:halted, acc}
+  end
+
+  def reduce(result, {:suspend, acc}, fun) do
+    {:suspended, acc, &reduce(result, &1, fun)}
+  end
+
+  def reduce(%{queued: [head | tail], seen: seen} = result, {:cont, acc} = cont, fun) do
+    result = %{result | queued: tail}
+
+    if MapSet.member?(seen, head) do
+      reduce(result, cont, fun)
+    else
+      seen = MapSet.put(seen, head)
+      result = %{result | seen: seen}
+      reduce(result, fun.(head, acc), fun)
+    end
+  end
+
+  def reduce(%{matches: [{index, [index_head | index_tail], struct} | tail]} = result, cont, fun) do
+    %{module: module, recordable: recordable, key_index: key_index} = result
+
+    record =
+      struct
+      |> Map.put(index, index_head)
+      |> recordable.to_record()
+
+    queued = Server.by_index_match(record, module, {index, key_index}, [])
+
+    result = %{result | matches: [{index, index_tail, struct} | tail], queued: queued}
+    reduce(result, cont, fun)
+  end
+
+  def reduce(%{matches: [{_index, [], _struct} | tail]} = result, cont, fun) do
+    result = %{result | matches: tail}
+    reduce(result, cont, fun)
+  end
+
+  def reduce(%{module: module, selectors: [_ | _] = selectors} = result, cont, fun) do
+    queue = Server.select_with_selectors(module, List.flatten(selectors))
+    result = %{result | selectors: [], queued: queue}
+    reduce(result, cont, fun)
+  end
+
+  def reduce(%{matches: [], selectors: [], queued: []}, {:cont, acc}, _fun) do
+    {:done, acc}
   end
 end
