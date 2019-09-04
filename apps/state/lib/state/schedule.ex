@@ -196,7 +196,8 @@ defmodule State.Schedule do
 
   def build_query(%{date: date} = filters, query) do
     filters = Map.delete(filters, :date)
-    query = Map.put(query, :service_id, &State.ServiceByDate.valid?(&1, date))
+    service_ids = State.ServiceByDate.by_date(date)
+    query = Map.put(query, :service_id, service_ids)
     build_query(filters, query)
   end
 

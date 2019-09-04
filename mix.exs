@@ -45,7 +45,9 @@ defmodule ApiUmbrella.Mixfile do
       # Test coverage reporting on coveralls.io
       {:excoveralls, "~> 0.5", only: :test},
       # Generate docs with `mix docs`
-      {:ex_doc, "~> 0.20", only: [:dev, :test]}
+      {:ex_doc, "~> 0.20", only: [:dev, :test]},
+      {:benchee, ">= 0.0.0"},
+      {:eflame, ">= 0.0.0"}
     ]
   end
 

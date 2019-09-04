@@ -167,7 +167,8 @@ defmodule State.Trip do
 
   def build_query(%{date: date} = filters, query) do
     filters = Map.delete(filters, :date)
-    query = Map.put(query, :service_id, &ServiceByDate.valid?(&1, date))
+    service_ids = ServiceByDate.by_date(date)
+    query = Map.put(query, :service_id, service_ids)
     build_query(filters, query)
   end
 
