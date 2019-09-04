@@ -83,6 +83,13 @@ defmodule State.Server.QueryTest do
       result = query(Server, [%{id: [1]}, %{id: [2]}])
       assert result |> Enum.map(& &1.id) |> Enum.sort() == [1, 2]
     end
+
+    test "can accept a function to filter on" do
+      items = gen_items(3)
+      Server.new_state(items)
+
+      assert [%Example{id: 1}] = query_list(Server, %{id: [1, 2], data: &(&1 == 1)})
+    end
   end
 
   defp start_server(_) do

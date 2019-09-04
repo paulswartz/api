@@ -62,14 +62,20 @@ defmodule State.Server.Query do
     {is_db_index?, index} = first_index(module.indices(), q)
     rest = Map.delete(q, index)
 
+    filter_fn = & &1
+
     case {is_db_index?,
-          Enum.reduce_while(rest, {recordable.filled(:_), [], 1}, &build_struct_and_guards/2)} do
-      {true, {struct, [], _}} ->
+          Enum.reduce_while(
+            rest,
+            {recordable.filled(:_), [], filter_fn, 1},
+            &build_struct_and_guards/2
+          )} do
+      {true, {struct, [], filter_fn, _}} ->
         index_values = Map.get(q, index)
 
-        %{result | matches: [{index, index_values, struct} | result.matches]}
+        %{result | matches: [{index, index_values, struct, filter_fn} | result.matches]}
 
-      {_, {struct, guards, _}} ->
+      {_, {struct, guards, filter_fn, _}} ->
         # put shorter guards at the front
         guards = :lists.usort(guards)
 
@@ -84,7 +90,7 @@ defmodule State.Server.Query do
             }
           end
 
-        %{result | selectors: [selectors | result.selectors]}
+        %{result | selectors: [{selectors, filter_fn} | result.selectors]}
 
       {_, :empty} ->
         result
@@ -145,16 +151,28 @@ defmodule State.Server.Query do
     List.to_tuple([:orelse | guards])
   end
 
-  defp build_struct_and_guards({key, [value]}, {struct, guards, i}) do
+  defp build_struct_and_guards({key, [value]}, {struct, guards, filter_fn, i}) do
     struct = Map.put(struct, key, value)
-    {:cont, {struct, guards, i}}
+    {:cont, {struct, guards, filter_fn, i}}
   end
 
-  defp build_struct_and_guards({key, [_, _ | _] = values}, {struct, guards, i}) do
+  defp build_struct_and_guards({key, [_ | _] = values}, {struct, guards, filter_fn, i}) do
     query_variable = query_variable(i)
     struct = Map.put(struct, key, query_variable)
     guard = build_guard(query_variable, values)
-    {:cont, {struct, [guard | guards], i + 1}}
+    {:cont, {struct, [guard | guards], filter_fn, i + 1}}
+  end
+
+  defp build_struct_and_guards({key, fun}, {struct, guards, filter_fn, i})
+       when is_function(fun, 1) do
+    new_filter_fn = fn items ->
+      for %{^key => value} = item <- filter_fn.(items),
+          fun.(value) do
+        item
+      end
+    end
+
+    {:cont, {struct, guards, new_filter_fn, i}}
   end
 
   defp build_struct_and_guards({_key, []}, _) do
@@ -202,7 +220,11 @@ defimpl Enumerable, for: State.Server.Query.Result do
     end
   end
 
-  def reduce(%{matches: [{index, [index_head | index_tail], struct} | tail]} = result, cont, fun) do
+  def reduce(
+        %{matches: [{index, [index_head | index_tail], struct, filter_fn} | tail]} = result,
+        cont,
+        fun
+      ) do
     %{module: module, recordable: recordable} = result
 
     record =
@@ -211,18 +233,20 @@ defimpl Enumerable, for: State.Server.Query.Result do
       |> recordable.to_record()
 
     queued = Server.by_index_match(record, module, index, [])
+    queued = filter_fn.(queued)
 
-    result = %{result | matches: [{index, index_tail, struct} | tail], queued: queued}
+    result = %{result | matches: [{index, index_tail, struct, filter_fn} | tail], queued: queued}
     reduce(result, cont, fun)
   end
 
-  def reduce(%{matches: [{_index, [], _struct} | tail]} = result, cont, fun) do
+  def reduce(%{matches: [{_index, [], _struct, _filter_fn} | tail]} = result, cont, fun) do
     result = %{result | matches: tail}
     reduce(result, cont, fun)
   end
 
-  def reduce(%{module: module, selectors: [head | tail]} = result, cont, fun) do
+  def reduce(%{module: module, selectors: [{head, filter_fn} | tail]} = result, cont, fun) do
     queued = Server.select_with_selectors(module, head)
+    queued = filter_fn.(queued)
     result = %{result | selectors: tail, queued: queued}
     reduce(result, cont, fun)
   end
