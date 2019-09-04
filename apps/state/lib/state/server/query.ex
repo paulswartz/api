@@ -221,9 +221,9 @@ defimpl Enumerable, for: State.Server.Query.Result do
     reduce(result, cont, fun)
   end
 
-  def reduce(%{module: module, selectors: [_ | _] = selectors} = result, cont, fun) do
-    queue = Server.select_with_selectors(module, List.flatten(selectors))
-    result = %{result | selectors: [], queued: queue}
+  def reduce(%{module: module, selectors: [head | tail]} = result, cont, fun) do
+    queued = Server.select_with_selectors(module, head)
+    result = %{result | selectors: tail, queued: queued}
     reduce(result, cont, fun)
   end
 
