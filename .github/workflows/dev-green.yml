@@ -1,0 +1,47 @@
+name: Deploy to Dev-green
+
+on: workflow_dispatch
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    environment: dev-green
+    concurrency: dev-green
+    env:
+      AWS_REGION: us-east-1
+
+    steps:
+      - uses: actions/checkout@v2
+      - name: Get commit metadata
+        run: |
+          echo SHA_SHORT=$(git rev-parse --short ${{ github.sha }}) >> $GITHUB_ENV
+          echo COMMIT_MSG=$(git log --format=%B -n 1 ${{ github.sha }} | head -n 1) >> $GITHUB_ENV
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v1
+      - run: ./build.sh
+        env:
+          APP: api
+          DOCKER_REPO: ${{ secrets.DOCKER_REPO }}
+      - name: Deploy to EB
+        uses: einaregilsson/beanstalk-deploy@v17
+        with:
+          aws_access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          application_name: api
+          environment_name: api-dev-green
+          version_label: ${{ env.SHA_SHORT }}
+          version_description: ${{ env.COMMIT_MSG }}
+          region: ${{ env.AWS_REGION }}
+          deployment_package: api-build.zip
+      # - uses: mbta/actions/notify-slack-deploy@v1
+      #   if: ${{ !cancelled() }}
+      #   with:
+      #     webhook-url: ${{ secrets.SLACK_WEBHOOK }}
+      #     job-status: ${{ job.status }}
