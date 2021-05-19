@@ -1,0 +1,31 @@
+name: Deploy to Dev-green
+
+on: workflow_dispatch
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    environment: dev-green
+    concurrency: dev-green
+
+    steps:
+      - uses: actions/checkout@v2
+      - run: ./build.sh api
+        env:
+          DOCKER_REPO: ${{ secrets.DOCKER_REPO }}
+      - name: Deploy to EB
+        uses: einaregilsson/beanstalk-deploy@v17
+        with:
+          aws_access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          application_name: api
+          environment_name: api-dev-green
+          version_label: ${{ github.sha }}
+          region: us-east-1
+          deployment_package: api-build.zip
+      # - uses: mbta/actions/notify-slack-deploy@v1
+      #   if: ${{ !cancelled() }}
+      #   with:
+      #     webhook-url: ${{ secrets.SLACK_WEBHOOK }}
+      #     job-status: ${{ job.status }}
