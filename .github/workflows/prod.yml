@@ -17,7 +17,7 @@ jobs:
         run: |
           echo SHA_SHORT=$(git rev-parse --short ${{ github.sha }}) >> $GITHUB_ENV
       - name: Deploy to EB
-        uses: einaregilsson/beanstalk-deploy@v17
+        uses: mbta/beanstalk-deploy@v17
         with:
           aws_access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
