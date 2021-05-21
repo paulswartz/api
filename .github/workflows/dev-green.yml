@@ -25,10 +25,35 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v1
-      - run: ./build.sh
-        env:
-          APP: api
-          DOCKER_REPO: ${{ secrets.DOCKER_REPO }}
+      - uses: mbta/actions/build-push-ecr@v1
+        id: build-push
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          docker-repo: ${{ secrets.DOCKER_REPO }}
+      - name: Create deployment package
+        id: deployment-package
+        run: |
+          mkdir -p $RUNNER_TEMP/deploy
+          OUTPUT_ZIP=$RUNNER_TEMP/deploy.zip
+          test -d rel/.ebextensions && cp -r rel/.ebextensions $RUNNER_TEMP/deploy
+          echo > $RUNNER_TEMP/deploy/Dockerrun.aws.json <<EOF
+          {
+            "AWSEBDockerrunVersion": "1",
+            "Image": {
+              "Name": "${{ steps.build-push.outputs.docker-tag }}",
+              "Update": "true"
+            },
+            "Ports": [
+              {
+                "ContainerPort": "4000"
+              }
+            ]
+          }
+          EOF
+          cd $RUNNER_TEMP/deploy
+          zip -r $OUTPUT_ZIP .
+          echo "::set-output name=package::$OUTPUT_ZIP"
       - name: Deploy to EB
         uses: mbta/beanstalk-deploy@v17
         with:
@@ -39,7 +64,7 @@ jobs:
           version_label: ${{ env.SHA_SHORT }}
           version_description: ${{ env.COMMIT_MSG }}
           region: ${{ env.AWS_REGION }}
-          deployment_package: api-build.zip
+          deployment_package: ${{ steps.deployment-package.outputs.package }}
       # - uses: mbta/actions/notify-slack-deploy@v1
       #   if: ${{ !cancelled() }}
       #   with:
