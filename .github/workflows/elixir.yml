@@ -63,7 +63,7 @@ jobs:
         run: mix credo --strict
       - name: Run tests
         run: |
-          mix test --cover
+          mix lcov
           cd apps/state_mediator
           mix test --only integration
       - name: Save PR information
