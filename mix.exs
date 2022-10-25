@@ -61,7 +61,8 @@ defmodule ApiUmbrella.Mixfile do
     # Static analysis and style checking
     [
       {:credo, ">= 0.0.0", only: [:dev, :test], runtime: false},
-      {:lcov_ex, "~> 0.2", only: [:dev, :test], runtime: false},
+      {:lcov_ex,
+       github: "dariodf/lcov_ex", ref: "refactor-task", only: [:dev, :test], runtime: false},
       # Generate docs with `mix docs`
       {:ex_doc, "~> 0.20", only: [:dev, :test], runtime: false}
     ]
