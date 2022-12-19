@@ -6,7 +6,7 @@ defmodule State.Vehicle do
   * route ID
   * label
   """
-  use State.Server,
+  use State.SqlServer,
     indices: [:id, :trip_id, :effective_route_id],
     parser: Parse.VehiclePositions,
     recordable: Model.Vehicle,
@@ -22,7 +22,7 @@ defmodule State.Vehicle do
           optional(:route_types) => [Model.Route.route_type(), ...]
         }
 
-  @impl State.Server
+  @impl State.SqlServer
   def post_load_hook(structs) do
     structs
     |> Enum.sort_by(&{&1.id, !Vehicle.primary?(&1)})
@@ -37,7 +37,7 @@ defmodule State.Vehicle do
     end
   end
 
-  @impl State.Server
+  @impl State.SqlServer
   def pre_insert_hook(vehicle) do
     update_effective_route_id(vehicle)
   end
@@ -92,12 +92,16 @@ defmodule State.Vehicle do
   end
 
   defp build_filters(matchers, :effective_route_id, route_ids, filters) do
-    direction_id = filters[:direction_id] || :_
+    direction_id = filters[:direction_id]
 
     for matcher <- matchers, route_id <- route_ids do
-      matcher
-      |> Map.put(:effective_route_id, route_id)
-      |> Map.put(:direction_id, direction_id)
+      matcher = Map.put(matcher, :effective_route_id, route_id)
+
+      if direction_id do
+        Map.put(matcher, :direction_id, direction_id)
+      else
+        matcher
+      end
     end
   end
 

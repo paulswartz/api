@@ -1,4 +1,4 @@
-defmodule State.ServerTest do
+defmodule State.SqlServerTest do
   use ExUnit.Case, async: true
 
   defmodule Example do
@@ -13,23 +13,16 @@ defmodule State.ServerTest do
   end
 
   defmodule Server do
-    use State.Server,
+    use State.SqlServer,
       indices: [:id, :other_key],
-      parser: State.ServerTest.Parser,
-      recordable: State.ServerTest.Example
+      parser: State.SqlServerTest.Parser,
+      recordable: State.SqlServerTest.Example
   end
 
   defp start_server(module) do
-    module.start_link()
+    Application.ensure_all_started(:events)
+    start_supervised!(module)
     module.new_state([])
-
-    on_exit(fn ->
-      try do
-        GenServer.stop(module, :normal, 5_000)
-      catch
-        :exit, _ -> :ok
-      end
-    end)
 
     :ok
   end
@@ -49,6 +42,17 @@ defmodule State.ServerTest do
       assert Server.all() == []
       Server.new_state([%Example{}])
       assert Server.all() == [%Example{}]
+    end
+
+    test "all/0 can store lists and other structs" do
+      value = %Example{
+        data: %Example{
+          data: [1, 2]
+        }
+      }
+
+      Server.new_state([value])
+      assert Server.all() == [value]
     end
 
     test "all_keys/0 returns the keys" do
@@ -77,22 +81,22 @@ defmodule State.ServerTest do
     end
 
     test "maintains different indexes" do
-      value = %Example{id: :id, other_key: :other}
+      value = %Example{id: "id", other_key: "other"}
       Server.new_state([value])
-      assert Server.by_id(:id) == [value]
-      assert Server.by_id(:other) == []
-      assert Server.by_other_key(:id) == []
-      assert Server.by_other_key(:other) == [value]
+      assert Server.by_id("id") == [value]
+      assert Server.by_id("other") == []
+      assert Server.by_other_key("id") == []
+      assert Server.by_other_key("other") == [value]
     end
 
     test "match returns items which match additional values" do
-      value = %Example{id: :id, data: :data}
+      value = %Example{id: "id", data: "data"}
       Server.new_state([value])
 
-      for id <- [nil, :id],
-          data <- [nil, :data] do
+      for id <- [nil, "id"],
+          data <- [nil, "data"] do
         expected =
-          if {id, data} == {:id, :data} do
+          if {id, data} == {"id", "data"} do
             [value]
           else
             []
@@ -105,26 +109,26 @@ defmodule State.ServerTest do
 
     test "select does multiple matches" do
       values = [
-        %Example{id: :id, data: :data},
-        %Example{id: :other, data: :data}
+        %Example{id: "id", data: "data"},
+        %Example{id: "other", data: "data"}
       ]
 
       Server.new_state(values)
-      matchers = [%{id: :id}, %{id: :other}]
+      matchers = [%{id: "id"}, %{id: "other"}]
       assert matchers |> Server.select() |> Enum.sort() == values
       assert matchers |> Server.select(:id) |> Enum.sort() == values
     end
 
     test "select_limit can limit the returned data" do
       values = [
-        %Example{id: :id, data: :data},
-        %Example{id: :other, data: :data}
+        %Example{id: "id", data: "data"},
+        %Example{id: "other", data: "data"}
       ]
 
       Server.new_state(values)
 
-      assert [_] = Server.select_limit([%{data: :data}], 1)
-      assert [] = Server.select_limit([%{data: :no_data}], 1)
+      assert [_] = Server.select_limit([%{data: "data"}], 1)
+      assert [] = Server.select_limit([%{data: "no_data"}], 1)
     end
 
     test "new_state overwrites a previous state" do
@@ -148,50 +152,37 @@ defmodule State.ServerTest do
       Server.new_state([value])
       assert Server.by_id(1) == [value]
 
-      task =
-        Task.async(fn ->
-          [value]
-          |> Stream.cycle()
-          |> Server.new_state(:infinity)
-        end)
+      task = fn task ->
+        Server.new_state([value])
+        task.(task)
+      end
+
+      task_pid = spawn(fn -> task.(task) end)
 
       for _i <- Range.new(0, 1_000) do
         assert Server.by_id(1) != []
       end
 
       # wait for everything to shut down
-      Task.shutdown(task, :brutal_kill)
-      Process.flag(:trap_exit, true)
-      example_pid = GenServer.whereis(Server)
-
-      case example_pid do
-        nil ->
-          :ok
-
-        pid ->
-          Process.exit(pid, :brutal_kill)
-
-          receive do
-            {:EXIT, ^pid, :brutal_kill} -> :ok
-          end
-      end
-
-      Process.flag(:trap_exit, false)
+      ref = Process.monitor(task_pid)
+      Process.exit(task_pid, :brutal_kill)
+      assert_receive {:DOWN, ^ref, :process, ^task_pid, _}
     end
   end
 
   describe "hooks" do
     defmodule HooksServer do
-      use State.Server,
+      use State.SqlServer,
         indices: [:id, :other_key],
-        parser: State.ServerTest.Parser,
-        recordable: State.ServerTest.Example
+        parser: State.SqlServerTest.Parser,
+        recordable: State.SqlServerTest.Example
 
-      @impl State.Server
+      @impl State.SqlServer
       def post_commit_hook do
         case all() do
-          [%Example{data: test_pid} | _] when is_pid(test_pid) ->
-            send(test_pid, {:post_commit, self()})
+          [%Example{data: <<"modified ", 131, test_pid_binary::binary>>} | _] ->
+            pid = :erlang.binary_to_term(<<131>> <> test_pid_binary)
+            send(pid, {:post_commit, self()})
 
             receive do
               :continue -> :ok
@@ -202,7 +193,7 @@ defmodule State.ServerTest do
         end
       end
 
-      @impl State.Server
+      @impl State.SqlServer
       def post_load_hook(examples) do
         Enum.map(examples, fn
           %Example{data: data} = example when is_integer(data) -> struct!(example, data: data + 1)
@@ -210,7 +201,7 @@ defmodule State.ServerTest do
         end)
       end
 
-      @impl State.Server
+      @impl State.SqlServer
       def pre_insert_hook(%Example{data: data} = example) when is_binary(data) do
         [struct!(example, data: "modified " <> data), struct!(example, data: "new " <> data)]
       end
@@ -227,12 +218,14 @@ defmodule State.ServerTest do
       Events.subscribe({:new_state, HooksServer})
 
       # use a separate process, else we are blocked on the post_commit_hook's `receive`
-      spawn_link(fn -> HooksServer.new_state([%Example{id: 1, data: test_pid}]) end)
+      spawn_link(fn ->
+        HooksServer.new_state([%Example{id: 1, data: :erlang.term_to_binary(test_pid)}])
+      end)
 
       receive do
         {:post_commit, pid} ->
           # post_commit_hook has not yet returned; new state should be present, but not published
-          assert [%Example{id: 1}] = HooksServer.all()
+          assert [%Example{id: 1} | _] = HooksServer.all()
           refute_receive {:event, {:new_state, HooksServer}, _, _}
 
           # tell post_commit_hook to return
@@ -248,50 +241,33 @@ defmodule State.ServerTest do
       HooksServer.new_state([
         %Example{id: 1, data: 37},
         %Example{id: 1, data: 43},
-        %Example{id: 2, data: :other}
+        %Example{id: 2, data: nil}
       ])
 
-      assert [%{data: 38}, %{data: 44}, %{data: :other}] = HooksServer.all()
-      assert [%{data: 38}, %{data: 44}] = HooksServer.by_id(1)
+      assert [%{data: 38}, %{data: 44}, %{data: nil}] = Enum.sort(HooksServer.all())
+      assert [%{data: 38}, %{data: 44}] = Enum.sort(HooksServer.by_id(1))
       assert [%{data: 38}] = HooksServer.select([%{data: 37}])
     end
 
     test "pre_insert_hook transforms structs into one or more new structs when inserted" do
-      HooksServer.new_state([%Example{id: 1, data: "test"}, %Example{id: 2, data: :test}])
+      HooksServer.new_state([%Example{id: 1, data: "test"}, %Example{id: 2, data: nil}])
       assert [%{data: "modified test"}, %{data: "new test"}] = HooksServer.by_id(1)
-      assert [%{data: :test}] = HooksServer.by_id(2)
+      assert [%{data: nil}] = HooksServer.by_id(2)
     end
   end
 
   describe "events" do
-    setup do
-      start_server(Server)
-    end
-
     test "new_state emits an event with the size" do
+      start_server(Server)
       Events.subscribe({:new_state, Server})
       Server.new_state([%Example{id: 1}])
       assert_received {:event, {:new_state, Server}, 1, nil}
     end
 
     test "emits an 0 size event on startup" do
-      GenServer.stop(Server)
       Events.subscribe({:new_state, Server})
       Server.start_link()
       assert_received {:event, {:new_state, Server}, 0, nil}
-    end
-  end
-
-  describe "shutdown/2" do
-    setup do
-      start_server(Server)
-    end
-
-    test "deletes mnesia table" do
-      :ok = :mnesia.wait_for_tables([Server], 0)
-      State.Server.shutdown(Server, :testing)
-
-      assert {:timeout, [Server]} = :mnesia.wait_for_tables([Server], 0)
     end
   end
 end
