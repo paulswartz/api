@@ -49,6 +49,7 @@ defmodule State.Mixfile do
     [
       {:rstar, github: 'armon/erl-rstar', app: false},
       {:timex, "~> 3.7"},
+      {:esqlite, "~> 0.8"},
       {:fetch, in_umbrella: true},
       {:events, in_umbrella: true},
       {:model, in_umbrella: true},

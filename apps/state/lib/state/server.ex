@@ -282,57 +282,63 @@ defmodule State.Server do
   end
 
   @spec match(module, map, atom, opts :: Keyword.t()) :: [struct]
-  def match(module, matcher, index, opts) when map_size(matcher) == 1 and is_atom(index) do
-    # if there's only one value for the matcher, then it's a simpler index read
-    %{^index => value} = matcher
-    by_index([value], module, {index, module.key_index()}, opts)
-  end
-
   def match(module, matcher, index, opts) when is_map(matcher) and is_atom(index) do
-    match = merge_with_filled(module, matcher)
+    {_, db} = :persistent_term.get(module)
+    query = select_query([matcher])
+    {:ok, select} = :esqlite3.prepare(db, query)
 
-    by_index_match(match, module, index, opts)
-  end
+    for {value, index} <- Enum.with_index(Map.values(matcher), 1) do
+      :ok = bind_value(select, index, value)
+    end
 
-  def merge_with_filled(module, matcher) do
-    recordable = module.recordable()
-
-    :_
-    |> recordable.filled()
-    |> Map.merge(matcher)
-    |> recordable.to_record()
+    select
+    |> :esqlite3.fetchall()
+    |> to_structs(module, opts)
   end
 
   def recreate_table(module) do
     recordable = module.recordable()
     indices = module.indices()
     attributes = recordable.fields()
-    id_field = List.first(attributes)
-    index = Enum.reject(indices, &Kernel.==(&1, id_field))
-    recreate_table(module, attributes: attributes, index: index, record_name: recordable)
-  end
+    priv_dir = :code.priv_dir(:state)
+    {:ok, db} = :esqlite3.open('#{priv_dir}/#{module}.sqlite')
+    {:ok, reader} = :esqlite3.open('#{priv_dir}/#{module}.sqlite')
 
-  def recreate_table(module, keywords) do
-    case :mnesia.create_table(
-           module,
-           record_name: Keyword.fetch!(keywords, :record_name),
-           attributes: Keyword.fetch!(keywords, :attributes),
-           index: Keyword.fetch!(keywords, :index),
-           storage_properties: [ets: [{:read_concurrency, true}]],
-           type: :bag,
-           local_content: true
-         ) do
-      {:atomic, :ok} ->
-        :mnesia.wait_for_tables([module], 5_000)
+    :esqlite3.exec(db, 'PRAGMA journal_mode=WAL')
+    :esqlite3.exec(db, "BEGIN IMMEDIATE")
+    :esqlite3.exec(db, 'DROP TABLE IF EXISTS t')
 
-      {:aborted, {:already_exists, _}} ->
-        {:atomic, :ok} = :mnesia.delete_table(module)
-        recreate_table(module, keywords)
+    columns =
+      attributes
+      |> Enum.map(fn column -> ~s["#{column}"] end)
+      |> Enum.join(", ")
+      |> io_inspect()
+
+    :ok =
+      case :esqlite3.exec(db, 'CREATE TABLE IF NOT EXISTS t (#{columns})') do
+        :ok ->
+          :ok
+
+        _error ->
+          :esqlite3.error_info(db)
+      end
+
+    for index <- indices do
+      :ok = :esqlite3.exec(db, 'CREATE INDEX #{index} ON t (#{index})')
     end
+
+    :persistent_term.put(module, {db, reader})
+    :esqlite3.exec(db, "COMMIT")
+    :ok
   end
 
   def shutdown(module, _reason) do
-    {:atomic, :ok} = :mnesia.delete_table(module)
+    {db, reader} = :persistent_term.get(module)
+    :esqlite3.exec(db, "DROP TABLE IF EXISTS t")
+    :esqlite3.close(db)
+    :esqlite3.close(reader)
+    :persistent_term.erase(module)
+    :ok
   end
 
   def create!(func, module) do
@@ -345,135 +351,267 @@ defmodule State.Server do
       )
 
     if enum do
-      with {:atomic, :ok} <- :mnesia.transaction(&create_children/2, [enum, module], 0) do
-        :ok
-      end
+      create_children(enum, module)
     else
       :ok
     end
   end
 
   defp create_children(enum, module) do
-    :mnesia.write_lock_table(module)
+    {db, _reader} = :persistent_term.get(module)
+    :ok = :esqlite3.exec(db, 'BEGIN IMMEDIATE')
+    :ok = :esqlite3.exec(db, 'DELETE FROM t')
+    recordable = module.recordable()
 
-    delete_all = fn ->
-      all_keys = :mnesia.all_keys(module)
-      :lists.foreach(&:mnesia.delete(module, &1, :write), all_keys)
+    # insert_sql_fields =
+    #   recordable.fields()
+    #   |> Enum.map(&Atom.to_string/1)
+    #   |> Enum.join(", ")
+
+    insert_sql_params =
+      recordable.fields()
+      |> Enum.map(fn _ -> "?" end)
+      |> Enum.join(", ")
+
+    insert_sql = 'INSERT INTO t VALUES (#{insert_sql_params})' |> io_inspect()
+
+    {:ok, insert} = :esqlite3.prepare(db, insert_sql)
+
+    for pre_hook_record <- enum,
+        record <- module.pre_insert_hook(pre_hook_record) do
+      for {value, index} <-
+            record
+            |> recordable.to_record()
+            |> Tuple.to_list()
+            |> Enum.with_index()
+            |> Enum.drop(1) do
+        io_inspect({:insert_bind, index, value})
+        :ok = bind_value(insert, index, value)
+      end
+
+      :ok =
+        case :esqlite3.fetchall(insert) do
+          [] ->
+            :ok
+
+          _other ->
+            :esqlite3.error_info(db)
+        end
+
+      :esqlite3.reset(insert)
     end
 
-    write_new = fn ->
-      recordable = module.recordable()
+    :ok = :esqlite3.exec(db, 'COMMIT')
+  end
 
-      enum
-      |> Stream.flat_map(&module.pre_insert_hook/1)
-      |> Enum.each(&:mnesia.write(module, recordable.to_record(&1), :write))
-    end
+  defp bind_value(query, index, value)
 
-    :ok =
-      debug_time(
-        delete_all,
-        fn milliseconds ->
-          "delete_all #{module} #{inspect(self())} took #{milliseconds}ms"
-        end
-      )
+  defp bind_value(query, index, value) when is_integer(value) do
+    :esqlite3.bind_int64(query, index, value)
+  end
 
-    :ok =
-      debug_time(
-        write_new,
-        fn milliseconds ->
-          "write_new #{module} #{inspect(self())} took #{milliseconds}ms"
-        end
-      )
+  defp bind_value(query, index, nil) do
+    :esqlite3.bind_null(query, index)
+  end
+
+  defp bind_value(query, index, value) do
+    value = :erlang.term_to_binary(value)
+    :esqlite3.bind_blob(query, index, value)
+  end
+
+  defp unbind_value(value)
+
+  defp unbind_value(value) when is_integer(value) do
+    value
+  end
+
+  defp unbind_value(:undefined) do
+    nil
+  end
+
+  defp unbind_value(value) when is_binary(value) do
+    :erlang.binary_to_term(value)
   end
 
   def size(module) do
-    :mnesia.table_info(module, :size)
+    {_, db} = :persistent_term.get(module)
+    [[count]] = :esqlite3.q(db, "SELECT COUNT(*) from t")
+    count
   end
 
   def all(module, opts) do
-    module
-    |> :ets.tab2list()
+    {_, db} = :persistent_term.get(module)
+
+    db
+    |> :esqlite3.q("SELECT * FROM t")
     |> to_structs(module, opts)
-  rescue
-    ArgumentError ->
-      # if the table is being rebuilt, we re-try to get the data
-      all(module, opts)
   end
 
   def all_keys(module) do
-    :mnesia.ets(fn ->
-      :mnesia.all_keys(module)
-    end)
+    {_, db} = :persistent_term.get(module)
+    [first_key | _] = module.recordable().fields()
+
+    db
+    |> :esqlite3.q('SELECT "#{first_key}" from t')
+    |> Enum.flat_map(& &1)
+    |> Enum.map(&unbind_value/1)
   end
 
-  def by_index(values, module, indices, opts) do
-    indices
-    |> build_read_fun(module)
-    |> :lists.flatmap(values)
-    |> to_structs(module, opts)
-  catch
-    :exit, {:aborted, {_, [^module | _]}} ->
-      by_index(values, module, indices, opts)
+  def by_index(values, module, indicies, opts)
+
+  def by_index([], _module, _indicies, _opts) do
+    []
   end
 
-  defp build_read_fun({key_index, key_index}, module) do
-    &:mnesia.dirty_read(module, &1)
-  end
+  def by_index(values, module, {index, _key_index}, opts) do
+    # IO.inspect({module, values, index, opts}, label: "by index")
+    {_, db} = :persistent_term.get(module)
 
-  defp build_read_fun({index, _key_index}, module) do
-    &:mnesia.dirty_index_read(module, &1, index)
-  end
+    {has_nil?, values} =
+      if Enum.member?(values, nil) do
+        {true, Enum.reject(values, &is_nil/1)}
+      else
+        {false, values}
+      end
 
-  def by_index_match(match, module, index, opts) do
-    module
-    |> :mnesia.dirty_index_match_object(match, index)
-    |> to_structs(module, opts)
-  end
+    query =
+      case values do
+        [] ->
+          'SELECT * FROM t'
 
-  def matchers_to_selectors(module, matchers) do
-    for matcher <- matchers do
-      {merge_with_filled(module, matcher), [], [:"$_"]}
+        [_] ->
+          'SELECT * FROM t WHERE "#{index}" = ?'
+
+        values ->
+          query_values = values |> Enum.map(fn _ -> "?" end) |> Enum.join(", ")
+          'SELECT * FROM t WHERE "#{index}" IN (#{query_values})'
+      end
+
+    query =
+      cond do
+        has_nil? and values == [] ->
+          [query, ' WHERE "#{index}" IS NULL']
+
+        has_nil? ->
+          [query, ' OR "#{index}" IS NULL']
+
+        true ->
+          query
+      end
+
+    order_by =
+      case values do
+        [] ->
+          []
+
+        [_] ->
+          []
+
+        values ->
+          [
+            ' ORDER BY CASE "#{index}" ',
+            values
+            |> Enum.with_index()
+            |> Enum.map(fn {_x, i} ->
+              'WHEN ? THEN #{i} '
+            end),
+            'END'
+          ]
+      end
+
+    query = [query, order_by] |> io_inspect()
+
+    {:ok, select} = :esqlite3.prepare(db, query)
+
+    for {value, index} <- Enum.with_index(values, 1) do
+      io_inspect({:by_index_bind, index, value})
+      :ok = bind_value(select, index, value)
     end
+
+    if order_by != [] do
+      for {value, index} <- Enum.with_index(values, 1 + length(values)) do
+        io_inspect({:by_index_order_bind, index, value})
+        :ok = bind_value(select, index, value)
+      end
+    end
+
+    select
+    |> :esqlite3.fetchall()
+    |> to_structs(module, opts)
   end
 
   @spec select(module, [map], atom | nil) :: [struct]
   def select(module, matchers, index \\ nil)
 
-  def select(module, matchers, nil) when is_list(matchers) do
-    selectors = matchers_to_selectors(module, matchers)
-    select_with_selectors(module, selectors)
-  end
-
-  def select(module, [matcher], index) when is_atom(index) do
-    module.match(matcher, index)
+  def select(_module, [], _index) do
+    []
   end
 
   def select(module, matchers, index) when is_list(matchers) and is_atom(index) do
-    :lists.flatmap(&module.match(&1, index), matchers)
-  end
+    {_, db} = :persistent_term.get(module)
+    # IO.inspect({module, matchers, index}, label: "select")
 
-  def select_with_selectors(module, selectors) when is_atom(module) and is_list(selectors) do
-    fn ->
-      :mnesia.select(module, selectors)
+    query = select_query(matchers)
+    {:ok, select} = :esqlite3.prepare(db, query)
+
+    for {{_key, value}, index} <- matchers |> Enum.flat_map(& &1) |> Enum.with_index(1) do
+      io_inspect({:select_bind, index, value})
+      :ok = bind_value(select, index, value)
     end
-    |> :mnesia.async_dirty()
+
+    select
+    |> :esqlite3.fetchall()
     |> to_structs(module, [])
   end
 
-  def select_limit(module, matchers, num_objects) do
-    selectors = matchers_to_selectors(module, matchers)
-    select_limit_with_selectors(module, selectors, num_objects)
+  def select_limit(module, matchers, num_objects)
+
+  def select_limit(_module, [], num_objects) when is_integer(num_objects) do
+    []
   end
 
-  def select_limit_with_selectors(module, selectors, num_objects) do
-    case :mnesia.async_dirty(fn ->
-           :mnesia.select(module, selectors, num_objects, :read)
-         end) do
-      :"$end_of_table" ->
-        []
+  def select_limit(module, matchers, num_objects) when is_integer(num_objects) do
+    {_, db} = :persistent_term.get(module)
+    query = select_query(matchers)
+    query = [query, ' LIMIT ?']
+    {:ok, select} = :esqlite3.prepare(db, query)
 
-      {records, _cont} ->
-        to_structs(records, module, [])
+    for {{_key, value}, index} <- matchers |> Enum.flat_map(& &1) |> Enum.with_index(1) do
+      io_inspect({:select_limit_bind, index, value})
+      :ok = bind_value(select, index, value)
+    end
+
+    limit_index = Enum.reduce(matchers, 0, fn matcher, sum -> sum + map_size(matcher) end) + 1
+    io_inspect({:bind_index, limit_index, num_objects})
+    :ok = bind_value(select, limit_index, num_objects)
+
+    select
+    |> :esqlite3.fetchall()
+    |> to_structs(module, [])
+  end
+
+  defp select_query(matchers) do
+    # matches everything
+    if Enum.member?(matchers, %{}) do
+      ['SELECT * FROM t ']
+    else
+      match_queries =
+        for matcher <- matchers do
+          match_query =
+            for {field, value} <- matcher do
+              if is_nil(value) do
+                '"#{field}" = ? OR "#{field}" IS NULL'
+              else
+                '"#{field}" = ?'
+              end
+            end
+            |> Enum.intersperse(' AND ')
+
+          ['(', match_query, ')']
+        end
+        |> Enum.intersperse(' OR ')
+
+      ['SELECT * FROM t WHERE ', match_queries] |> io_inspect()
     end
   end
 
@@ -481,6 +619,9 @@ defmodule State.Server do
     recordable = module.recordable()
 
     records
+    |> Enum.map(fn x ->
+      List.to_tuple([recordable | Enum.map(x, &unbind_value/1)])
+    end)
     |> Enum.map(&recordable.from_record(&1))
     |> module.post_load_hook()
     |> State.all(opts)
@@ -563,5 +704,10 @@ defmodule State.Server do
         e -> log_parse_error(module, e)
       end
     end)
+  end
+
+  defp io_inspect(value) do
+    # IO.inspect(value)
+    value
   end
 end
