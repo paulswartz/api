@@ -46,7 +46,7 @@ defmodule ALBMonitor.Mixfile do
     [
       {:ex_aws, "~> 2.0"},
       {:ex_aws_elastic_load_balancing, "~> 2.0"},
-      {:httpoison, "~> 1.7"},
+      {:httpoison, "~> 2.0"},
       {:jason, "~> 1.2"},
       {:mox, "~> 1.0", only: :test},
       {:sweet_xml, "~> 0.6"}
