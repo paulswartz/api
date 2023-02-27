@@ -13,7 +13,7 @@ defmodule ApiWeb.Router do
   """
 
   pipeline :secure do
-    if force_ssl = Application.get_env(:site, :secure_pipeline)[:force_ssl] do
+    if force_ssl = Application.compile_env(:site, :secure_pipeline)[:force_ssl] do
       plug(Plug.SSL, force_ssl)
     end
   end
@@ -23,14 +23,25 @@ defmodule ApiWeb.Router do
       Plug.Session,
       store: :cookie,
       key: "_api_key",
-      signing_salt: Application.get_env(:api_web, :signing_salt)
+      signing_salt: {Application, :get_env, [:api_web, :signing_salt]}
     )
 
+    @content_security_policy Enum.join(
+                               [
+                                 "default-src 'none'",
+                                 "img-src 'self' cdn.mbta.com",
+                                 "style-src 'self' 'unsafe-inline' maxcdn.bootstrapcdn.com fonts.googleapis.com",
+                                 "script-src 'self' maxcdn.bootstrapcdn.com code.jquery.com www.google.com www.gstatic.com",
+                                 "font-src fonts.gstatic.com maxcdn.bootstrapcdn.com",
+                                 "frame-src www.google.com"
+                               ],
+                               "; "
+                             )
     plug(:accepts, ["html"])
     plug(:fetch_session)
     plug(:fetch_flash)
     plug(:protect_from_forgery)
-    plug(:put_secure_browser_headers)
+    plug(:put_secure_browser_headers, %{"content-security-policy" => @content_security_policy})
     plug(ApiWeb.Plugs.FetchUser)
     plug(ApiWeb.Plugs.CheckForShutdown)
   end
