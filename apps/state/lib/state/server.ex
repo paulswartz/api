@@ -307,8 +307,8 @@ defmodule State.Server do
     recordable = module.recordable()
     indices = module.indices()
     attributes = recordable.fields()
-    id_field = List.first(attributes)
-    index = Enum.reject(indices, &Kernel.==(&1, id_field))
+    key_index = module.key_index()
+    index = Enum.reject(indices, &Kernel.==(&1, key_index))
     recreate_table(module, attributes: attributes, index: index, record_name: recordable)
   end
 
@@ -345,28 +345,47 @@ defmodule State.Server do
       )
 
     if enum do
-      with {:atomic, :ok} <- :mnesia.transaction(&create_children/2, [enum, module], 0) do
-        :ok
+      with {:atomic, result} <- :mnesia.transaction(&create_children/2, [enum, module], 0) do
+        {:ok, result}
       end
     else
-      :ok
+      {:ok, 0}
     end
   end
 
   defp create_children(enum, module) do
     :mnesia.write_lock_table(module)
 
+    {keys_to_delete, updates} =
+      case enum do
+        {:partial, updates} ->
+          key_index = module.key_index()
+          {Enum.map(updates, &Map.get(&1, key_index)), updates}
+
+        _ ->
+          {:all, enum}
+      end
+
     delete_all = fn ->
-      all_keys = :mnesia.all_keys(module)
+      all_keys =
+        if keys_to_delete == :all do
+          :mnesia.all_keys(module)
+        else
+          keys_to_delete
+        end
+
       :lists.foreach(&:mnesia.delete(module, &1, :write), all_keys)
     end
 
     write_new = fn ->
       recordable = module.recordable()
 
-      enum
+      updates
       |> Stream.flat_map(&module.pre_insert_hook/1)
-      |> Enum.each(&:mnesia.write(module, recordable.to_record(&1), :write))
+      |> Enum.reduce(0, fn item, sum ->
+        :mnesia.write(module, recordable.to_record(item), :write)
+        sum + 1
+      end)
     end
 
     :ok =
@@ -377,13 +396,15 @@ defmodule State.Server do
         end
       )
 
-    :ok =
+    write_count =
       debug_time(
         write_new,
         fn milliseconds ->
           "write_new #{module} #{inspect(self())} took #{milliseconds}ms"
         end
       )
+
+    write_count
   end
 
   def size(module) do
@@ -524,7 +545,7 @@ defmodule State.Server do
   end
 
   defp do_handle_new_state(module, func) do
-    :ok =
+    {:ok, update_count} =
       debug_time(
         fn -> create!(func, module) end,
         fn milliseconds ->
@@ -542,15 +563,13 @@ defmodule State.Server do
         end
       )
 
-    new_size = module.size()
-
     _ =
       Logger.info(fn ->
-        "Update #{module} #{inspect(self())}: #{new_size} items"
+        "Update #{module} #{inspect(self())}: #{update_count} items"
       end)
 
     module.update_metadata()
-    Events.publish({:new_state, module}, new_size)
+    Events.publish({:new_state, module}, update_count)
 
     :ok
   end
