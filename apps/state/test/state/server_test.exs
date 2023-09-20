@@ -252,11 +252,11 @@ defmodule State.ServerTest do
       HooksServer.new_state([
         %Example{id: 1, data: 37},
         %Example{id: 1, data: 43},
-        %Example{id: 2, data: nil}
+        %Example{id: 2, data: :other}
       ])
 
-      assert [%{data: 38}, %{data: 44}, %{data: nil}] = HooksServer.all()
-      assert [%{data: 38}, %{data: 44}] = HooksServer.by_id(1)
+      assert [%{data: 38}, %{data: 44}, %{data: :other}] = Enum.sort(HooksServer.all())
+      assert [%{data: 38}, %{data: 44}] = Enum.sort(HooksServer.by_id(1))
       assert [%{data: 38}] = HooksServer.select([%{data: 37}])
     end
 
