@@ -138,7 +138,7 @@ defmodule ApiWeb.PredictionControllerTest do
           {%{"stop" => "1", "route_type" => "1,2"}, [prediction1, prediction2]}
         ] do
       conn = get(conn, "/predictions", params)
-      assert conn.assigns.data == expected
+      assert Enum.sort(conn.assigns.data) == Enum.sort(expected)
     end
   end
 
