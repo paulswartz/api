@@ -148,20 +148,63 @@ defmodule State.ServerTest do
       Server.new_state([value])
       assert Server.by_id(1) == [value]
 
-      task =
-        Task.async(fn ->
-          [value]
-          |> Stream.cycle()
-          |> Server.new_state(:infinity)
-        end)
+      task = fn task ->
+        Server.new_state([value], :infinity)
+        task.(task)
+      end
+
+      task_pid = spawn(fn -> task.(task) end)
+
+      Process.sleep(10)
 
       for _i <- Range.new(0, 1_000) do
         assert Server.by_id(1) != []
       end
 
+      for _i <- Range.new(0, 1_000) do
+        assert Server.all() != []
+      end
+
       # wait for everything to shut down
-      Task.shutdown(task, :brutal_kill)
       Process.flag(:trap_exit, true)
+      Process.exit(task_pid, :brutal_kill)
+      example_pid = GenServer.whereis(Server)
+
+      case example_pid do
+        nil ->
+          :ok
+
+        pid ->
+          Process.exit(pid, :brutal_kill)
+
+          receive do
+            {:EXIT, ^pid, :brutal_kill} -> :ok
+          end
+      end
+
+      Process.flag(:trap_exit, false)
+    end
+
+    test "new_state does not show an empty state when sending partial updates" do
+      value = %Example{id: 1, data: 1}
+      Server.new_state([value, %Example{id: 2, data: 2}])
+
+      task = fn task ->
+        Server.new_state({:partial, [value]}, :infinity)
+        task.(task)
+      end
+
+      task_pid = spawn(fn -> task.(task) end)
+      Process.sleep(10)
+
+      for _i <- Range.new(0, 1_000) do
+        assert Server.by_id(1) != []
+        assert Server.by_id(2) != []
+      end
+
+      # wait for everything to shut down
+      Process.flag(:trap_exit, true)
+      Process.exit(task_pid, :brutal_kill)
       example_pid = GenServer.whereis(Server)
 
       case example_pid do
