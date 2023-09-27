@@ -187,9 +187,6 @@ defmodule State.Server do
       @impl State.Server
       def post_load_hook(structs), do: structs
 
-      @impl State.Server
-      def pre_insert_hook(item), do: [item]
-
       @impl Events.Server
       def handle_event({:fetch, unquote(opts[:fetched_filename])}, body, _, state) do
         case handle_call({:new_state, body}, nil, state) do
@@ -227,7 +224,6 @@ defmodule State.Server do
                      new_state: 2,
                      post_commit_hook: 0,
                      post_load_hook: 1,
-                     pre_insert_hook: 1,
                      select: 1,
                      select: 2,
                      select_limit: 2,
@@ -307,8 +303,8 @@ defmodule State.Server do
     recordable = module.recordable()
     indices = module.indices()
     attributes = recordable.fields()
-    id_field = List.first(attributes)
-    index = Enum.reject(indices, &Kernel.==(&1, id_field))
+    key_index = module.key_index()
+    index = Enum.reject(indices, &Kernel.==(&1, key_index))
     recreate_table(module, attributes: attributes, index: index, record_name: recordable)
   end
 
@@ -345,28 +341,47 @@ defmodule State.Server do
       )
 
     if enum do
-      with {:atomic, :ok} <- :mnesia.transaction(&create_children/2, [enum, module], 0) do
-        :ok
+      has_hook? = function_exported?(module, :pre_insert_hook, 1)
+
+      update =
+        case enum do
+          {:partial, enum} when has_hook? ->
+            {:partial, Stream.flat_map(enum, &module.pre_insert_hook/1)}
+
+          {:partial, _enum} = update ->
+            update
+
+          enum when has_hook? ->
+            {:all, Stream.flat_map(enum, &module.pre_insert_hook/1)}
+
+          enum ->
+            {:all, enum}
+        end
+
+      with {:atomic, count} <-
+             :mnesia.transaction(&create_children/2, [update, module], 10) do
+        {:ok, count}
       end
     else
-      :ok
+      {:ok, 0}
     end
   end
 
-  defp create_children(enum, module) do
+  defp create_children({:all, enum}, module) do
+    recordable = module.recordable()
     :mnesia.write_lock_table(module)
 
     delete_all = fn ->
       all_keys = :mnesia.all_keys(module)
+
       :lists.foreach(&:mnesia.delete(module, &1, :write), all_keys)
     end
 
     write_new = fn ->
-      recordable = module.recordable()
-
-      enum
-      |> Stream.flat_map(&module.pre_insert_hook/1)
-      |> Enum.each(&:mnesia.write(module, recordable.to_record(&1), :write))
+      Enum.reduce(enum, 0, fn item, count ->
+        :mnesia.write(module, recordable.to_record(item), :write)
+        count + 1
+      end)
     end
 
     :ok =
@@ -377,13 +392,40 @@ defmodule State.Server do
         end
       )
 
-    :ok =
+    count =
       debug_time(
         write_new,
         fn milliseconds ->
           "write_new #{module} #{inspect(self())} took #{milliseconds}ms"
         end
       )
+
+    count
+  end
+
+  defp create_children({:partial, enum}, module) do
+    recordable = module.recordable()
+    key_index = module.key_index()
+
+    update = fn ->
+      enum
+      |> Enum.group_by(&Map.get(&1, key_index))
+      |> Enum.reduce(0, fn {key, items}, count ->
+        :mnesia.delete(module, key, :write)
+        :lists.foreach(&:mnesia.write(module, recordable.to_record(&1), :write), items)
+        length(items) + count
+      end)
+    end
+
+    count =
+      debug_time(
+        update,
+        fn milliseconds ->
+          "partial_update #{module} #{inspect(self())} took #{milliseconds}ms"
+        end
+      )
+
+    count
   end
 
   def size(module) do
@@ -407,27 +449,26 @@ defmodule State.Server do
   end
 
   def by_index(values, module, indices, opts) do
-    indices
-    |> build_read_fun(module)
-    |> :lists.flatmap(values)
-    |> to_structs(module, opts)
-  catch
-    :exit, {:aborted, {_, [^module | _]}} ->
-      by_index(values, module, indices, opts)
+    read_fun = build_read_fun(indices, module)
+
+    {:atomic, results} = :mnesia.transaction(&:lists.flatmap/2, [read_fun, values])
+
+    to_structs(results, module, opts)
   end
 
   defp build_read_fun({key_index, key_index}, module) do
-    &:mnesia.dirty_read(module, &1)
+    &:mnesia.read(module, &1)
   end
 
   defp build_read_fun({index, _key_index}, module) do
-    &:mnesia.dirty_index_read(module, &1, index)
+    &:mnesia.index_read(module, &1, index)
   end
 
   def by_index_match(match, module, index, opts) do
-    module
-    |> :mnesia.dirty_index_match_object(match, index)
-    |> to_structs(module, opts)
+    {:atomic, results} =
+      :mnesia.transaction(&:mnesia.index_match_object/4, [module, match, index, :read])
+
+    to_structs(results, module, opts)
   end
 
   def matchers_to_selectors(module, matchers) do
@@ -449,15 +490,17 @@ defmodule State.Server do
   end
 
   def select(module, matchers, index) when is_list(matchers) and is_atom(index) do
-    :lists.flatmap(&module.match(&1, index), matchers)
+    {:atomic, results} =
+      :mnesia.transaction(fn ->
+        :lists.flatmap(&module.match(&1, index), matchers)
+      end)
+
+    results
   end
 
   def select_with_selectors(module, selectors) when is_atom(module) and is_list(selectors) do
-    fn ->
-      :mnesia.select(module, selectors)
-    end
-    |> :mnesia.async_dirty()
-    |> to_structs(module, [])
+    {:atomic, results} = :mnesia.transaction(&:mnesia.select/2, [module, selectors])
+    to_structs(results, module, [])
   end
 
   def select_limit(module, matchers, num_objects) do
@@ -466,13 +509,11 @@ defmodule State.Server do
   end
 
   def select_limit_with_selectors(module, selectors, num_objects) do
-    case :mnesia.async_dirty(fn ->
-           :mnesia.select(module, selectors, num_objects, :read)
-         end) do
-      :"$end_of_table" ->
+    case :mnesia.transaction(&:mnesia.select/4, [module, selectors, num_objects, :read]) do
+      {:atomic, :"$end_of_table"} ->
         []
 
-      {records, _cont} ->
+      {:atomic, {records, _cont}} ->
         to_structs(records, module, [])
     end
   end
@@ -481,7 +522,7 @@ defmodule State.Server do
     recordable = module.recordable()
 
     records
-    |> Enum.map(&recordable.from_record(&1))
+    |> Enum.map(&recordable.from_record/1)
     |> module.post_load_hook()
     |> State.all(opts)
   end
@@ -524,7 +565,7 @@ defmodule State.Server do
   end
 
   defp do_handle_new_state(module, func) do
-    :ok =
+    {:ok, update_count} =
       debug_time(
         fn -> create!(func, module) end,
         fn milliseconds ->
@@ -542,15 +583,13 @@ defmodule State.Server do
         end
       )
 
-    new_size = module.size()
-
     _ =
       Logger.info(fn ->
-        "Update #{module} #{inspect(self())}: #{new_size} items"
+        "Update #{module} #{inspect(self())}: #{update_count} items"
       end)
 
     module.update_metadata()
-    Events.publish({:new_state, module}, new_size)
+    Events.publish({:new_state, module}, update_count)
 
     :ok
   end

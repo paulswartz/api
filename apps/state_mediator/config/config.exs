@@ -28,7 +28,11 @@ config :state_mediator, State.Vehicle,
     :system,
     "MBTA_VEHICLE_SOURCE",
     "https://cdn.mbta.com/realtime/VehiclePositions_enhanced.json"
-  }
+  },
+  broker: {:system, "MBTA_VEHICLE_BROKER", nil},
+  topic: {:system, "MBTA_VEHICLE_TOPIC", nil},
+  username: {:system, "MBTA_VEHICLE_USERNAME", nil},
+  password: {:system, "MBTA_VEHICLE_PASSWORD", nil}
 
 # This configuration is loaded before any dependency and is restricted
 # to this project. If another project depends on this project, this

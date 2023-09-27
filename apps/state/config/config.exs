@@ -208,6 +208,9 @@ config :state, :stops_on_route,
     "Shuttle-AlewifeLittletonLocal-0-" => true,
     # Fitchburg Line shuttles to/from Wachusett
     "Shuttle-LittletonWachusett-0-" => true,
+    "Shuttle-ShirleyWachusett-0-" => true,
+    "CR-Fitchburg-2a5f6366-" => true,
+    "CR-Fitchburg-d82ea33a-" => true,
     # Newton Connection RailBus for Worcester Line
     "Shuttle-NewtonHighlandsWellesleyFarms-0-" => true,
     # Kingston Line shuttles to/from South Weymouth
@@ -408,6 +411,26 @@ config :state, :stops_on_route,
       "place-DB-2230",
       "place-DB-2222",
       "place-DB-2205"
+    ],
+    {"CR-Providence", 0} => [
+      "place-DB-2265",
+      "place-DB-2258",
+      "place-DB-2249",
+      "place-DB-2240",
+      "place-DB-2230",
+      "place-DB-2222",
+      "place-DB-2205",
+      "place-DB-0095"
+    ],
+    {"CR-Providence", 1} => [
+      "place-DB-2265",
+      "place-DB-2258",
+      "place-DB-2249",
+      "place-DB-2240",
+      "place-DB-2230",
+      "place-DB-2222",
+      "place-DB-2205",
+      "place-DB-0095"
     ],
     {"CR-Fairmount", 0} => [
       "place-FB-0166",
