@@ -312,7 +312,7 @@ defmodule State.SqlServer do
         Module.concat(module, Writer),
         fn db ->
           _ = Sql.query(db, "DROP TABLE IF EXISTS #{table}", [])
-          _ = Sql.query(db, "CREATE TABLE #{table} (#{columns})", [])
+          _ = Sql.query(db, "CREATE TABLE #{table} (_blob BLOB, #{columns})", [])
 
           for index <- indices do
             _ =
@@ -356,9 +356,10 @@ defmodule State.SqlServer do
       enum
       |> Stream.flat_map(&module.pre_insert_hook/1)
       |> Stream.map(fn item ->
-        item
-        |> recordable.to_list()
-        |> Enum.map(&bind_value/1)
+        [{:blob, :erlang.term_to_binary(item)}] ++
+          (item
+           |> recordable.to_list()
+           |> Enum.map(&bind_value/1))
       end)
 
     {:ok, _} =
@@ -370,7 +371,7 @@ defmodule State.SqlServer do
           for group <- Stream.chunk_every(values, chunk_size) do
             insert_group_params =
               for _ <- group do
-                ["(", insert_sql_params, ")"]
+                ["(?, ", insert_sql_params, ")"]
               end
               |> Enum.intersperse(", ")
 
@@ -422,7 +423,7 @@ defmodule State.SqlServer do
 
   def all(module, opts) do
     Sql.run(Module.concat(module, Reader), fn db ->
-      result = Sql.stream(db, ["SELECT * FROM ", table_name(module)], [])
+      result = Sql.stream(db, ["SELECT _blob FROM ", table_name(module)], [])
       to_structs(result, module, opts)
     end)
   end
@@ -455,7 +456,11 @@ defmodule State.SqlServer do
       column = column_name(index)
 
       {:ok, result} =
-        Sql.query(db, ["SELECT * FROM ", table_name(module), " WHERE ", column, " IS NULL"], [])
+        Sql.query(
+          db,
+          ["SELECT _blob FROM ", table_name(module), " WHERE ", column, " IS NULL"],
+          []
+        )
 
       to_structs(result.rows, module, opts)
     end)
@@ -467,7 +472,9 @@ defmodule State.SqlServer do
       value = bind_value(value)
 
       {:ok, result} =
-        Sql.query(db, ["SELECT * FROM ", table_name(module), " WHERE ", column, " = ?"], [value])
+        Sql.query(db, ["SELECT _blob FROM ", table_name(module), " WHERE ", column, " = ?"], [
+          value
+        ])
 
       to_structs(result.rows, module, opts)
     end)
@@ -515,7 +522,7 @@ defmodule State.SqlServer do
       result =
         Sql.stream(
           db,
-          ["SELECT * FROM ", table_name(module), " WHERE ", wheres, order_by],
+          ["SELECT _blob FROM ", table_name(module), " WHERE ", wheres, order_by],
           Enum.map(where_values ++ order_by_values, &bind_value/1)
         )
 
@@ -531,15 +538,13 @@ defmodule State.SqlServer do
   end
 
   def select(module, matchers, index, opts) when is_list(matchers) and is_atom(index) do
-    # IO.inspect({module, :select, index, matchers})
-
     Sql.run(Module.concat(module, Reader), fn db ->
       {wheres, values} = where_query(matchers)
 
       result =
         Sql.stream(
           db,
-          ["SELECT * FROM ", table_name(module), " WHERE ", wheres],
+          ["SELECT _blob FROM ", table_name(module), " WHERE ", wheres],
           Enum.map(values, &bind_value/1)
         )
 
@@ -560,7 +565,7 @@ defmodule State.SqlServer do
       result =
         Sql.stream(
           db,
-          ["SELECT * FROM ", table_name(module), " WHERE ", wheres, "LIMIT ?"],
+          ["SELECT _blob FROM ", table_name(module), " WHERE ", wheres, "LIMIT ?"],
           Enum.map(values, &bind_value/1) ++ [num_objects]
         )
 
@@ -597,12 +602,13 @@ defmodule State.SqlServer do
   end
 
   defp to_structs(records, module, opts) do
-    recordable = module.recordable()
+    # recordable = module.recordable()
 
     records
     |> Enum.flat_map(&unwrap_result/1)
-    |> Enum.map(fn values ->
-      recordable.from_list(Enum.map(values, &unbind_value/1))
+    |> Enum.map(fn [value] ->
+      # recordable.from_list(Enum.map(values, &unbind_value/1))
+      :erlang.binary_to_term(value)
     end)
     |> module.post_load_hook()
     |> State.all(opts)
