@@ -328,7 +328,7 @@ defmodule State.SqlServer do
     :ok
   end
 
-  def create!(func, module) do
+  def create(func, module) do
     enum =
       debug_time(
         func,
@@ -338,10 +338,80 @@ defmodule State.SqlServer do
       )
 
     if enum do
-      create_children(enum, module)
+      debug_time(
+        fn ->
+          create_children(enum, module)
+        end,
+        fn milliseconds ->
+          "create_children #{module} took #{milliseconds}ms"
+        end
+      )
     else
-      :ok
+      {:ok, 0}
     end
+  end
+
+  defp create_children({:partial, enum}, module) do
+    table = table_name(module)
+    recordable = module.recordable()
+    [key | _] = module.indices()
+    insert_sql_params = Enum.map_join(recordable.fields(), ", ", fn _ -> "?" end)
+
+    groups =
+      enum
+      |> Enum.flat_map(&module.pre_insert_hook/1)
+      |> Enum.map(fn item ->
+        {Map.get(item, key),
+         [
+           {:blob, :erlang.term_to_binary(item)}
+           | item
+             |> recordable.to_list()
+             |> Enum.map(&bind_value/1)
+         ]}
+      end)
+      |> Enum.group_by(&elem(&1, 0))
+
+    {:ok, counts} =
+      Sql.transaction(
+        Module.concat(module, Writer),
+        fn db ->
+          for {key_value, items} <- groups do
+            insert_group_params =
+              for _ <- items do
+                ["(?, ", insert_sql_params, ")"]
+              end
+              |> Enum.intersperse(", ")
+
+            {where, where_value} =
+              if key_value == nil do
+                {"IS NULL", []}
+              else
+                {" = ?", [bind_value(key_value)]}
+              end
+
+            _ =
+              Sql.query(
+                db,
+                ["DELETE FROM ", table, " WHERE ", column_name(key), where],
+                where_value
+              )
+
+            inserts = Enum.flat_map(items, fn {_, values} -> values end)
+
+            {:ok, _} =
+              Sql.query(
+                db,
+                ["INSERT INTO ", table, " VALUES ", insert_group_params],
+                inserts
+              )
+
+            length(items)
+          end
+        end,
+        timeout: 280_000
+      )
+
+    {:ok, Enum.sum(counts)}
   end
 
   defp create_children(enum, module) do
@@ -362,7 +432,7 @@ defmodule State.SqlServer do
            |> Enum.map(&bind_value/1))
       end)
 
-    {:ok, _} =
+    {:ok, counts} =
       Sql.transaction(
         Module.concat(module, Writer),
         fn db ->
@@ -375,18 +445,20 @@ defmodule State.SqlServer do
               end
               |> Enum.intersperse(", ")
 
-            _ =
+            {:ok, _} =
               Sql.query(
                 db,
                 ["INSERT INTO ", table, " VALUES ", insert_group_params],
                 List.flatten(group)
               )
+
+            length(group)
           end
         end,
         timeout: 280_000
       )
 
-    :ok
+    {:ok, Enum.sum(counts)}
   end
 
   defp bind_value(value) when is_integer(value) or is_binary(value) or is_nil(value) do
@@ -657,9 +729,9 @@ defmodule State.SqlServer do
   end
 
   defp do_handle_new_state(module, func) do
-    :ok =
+    {:ok, new_size} =
       debug_time(
-        fn -> create!(func, module) end,
+        fn -> create(func, module) end,
         fn milliseconds ->
           "init_table #{module} #{inspect(self())} took #{milliseconds}ms"
         end
@@ -675,15 +747,13 @@ defmodule State.SqlServer do
         end
       )
 
-    new_size = module.size()
-
     _ =
       Logger.info(fn ->
         "Update #{module} #{inspect(self())}: #{new_size} items"
       end)
 
     module.update_metadata()
-    Events.publish({:new_state, module}, new_size)
+    Events.publish({:new_state, module}, module.size())
 
     :ok
   end
