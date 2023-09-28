@@ -1,6 +1,6 @@
-defmodule State.Server do
+defmodule State.SqlServer do
   @moduledoc """
-  Generates an Mnesia database for structs, indexed by specified struct fields.
+  Wraps a SQLite database for structs, indexed by specified struct fields.
 
   ## Example
 
@@ -9,7 +9,7 @@ defmodule State.Server do
   end
 
   defmodule ExampleServer do
-    use State.Server, indices: [:id, :other_key], recordable: Example
+    use State.SqlServer, indices: [:id, :other_key], recordable: Example
   end
 
   Then, clients can do:
@@ -68,6 +68,7 @@ defmodule State.Server do
 
   import Events
   import State.Logger
+  alias State.Sqlite, as: Sql
 
   defmacro __using__(opts) do
     indices = Keyword.fetch!(opts, :indices)
@@ -78,21 +79,29 @@ defmodule State.Server do
         {:__aliases__, _, module_parts} -> Module.concat(module_parts)
       end
 
-    key_index = List.first(recordable.fields)
-
     quote do
       use Events.Server
       require Logger
 
       alias unquote(__MODULE__), as: Server
-      alias unquote(opts[:recordable]), as: RECORDABLE
+      alias unquote(recordable), as: RECORDABLE
 
       @behaviour Server
 
       # Client functions
 
       @doc "Start the #{__MODULE__} server."
-      def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
+      def start_link(_opts \\ []) do
+        State.SqlServer.Supervisor.start_link(__MODULE__)
+      end
+
+      def child_spec(_opts \\ []) do
+        State.SqlServer.Supervisor.child_spec(__MODULE__)
+      end
+
+      def stop() do
+        State.SqlServer.Supervisor.stop(__MODULE__)
+      end
 
       @doc "Send a new state to the server."
       @spec new_state(any) :: :ok
@@ -131,7 +140,7 @@ defmodule State.Server do
         do: Server.select_limit(__MODULE__, matchers, num_objects)
 
       # define a `by_<index>` and `by_<index>s` method for each indexed field
-      unquote(State.Server.def_by_indices(indices, key_index: key_index))
+      unquote(State.SqlServer.def_by_indices(indices))
 
       # Metadata functions
 
@@ -143,16 +152,10 @@ defmodule State.Server do
       def fetched_filename, do: unquote(opts[:fetched_filename])
 
       @doc """
-      indices in the `:mnesia` table where state is stored
+      indices in the table where state is stored
       """
       @spec indices :: [atom]
       def indices, do: unquote(indices)
-
-      @doc """
-      The index for the primary key
-      """
-      @spec key_index :: atom
-      def key_index, do: List.first(recordable().fields())
 
       @doc """
       Module that defines struct used in state list and implements `Recordable` behaviour.
@@ -169,8 +172,6 @@ defmodule State.Server do
       @impl GenServer
       def init(nil), do: Server.init(__MODULE__)
 
-      def shutdown(reason, _state), do: Server.shutdown(__MODULE__, reason)
-
       @impl GenServer
       def handle_call(request, from, state),
         do: Server.handle_call(__MODULE__, request, from, state)
@@ -178,14 +179,17 @@ defmodule State.Server do
       @impl GenServer
       def handle_cast(request, state), do: Server.handle_cast(__MODULE__, request, state)
 
-      @impl State.Server
+      @impl State.SqlServer
       def handle_new_state(new_state), do: Server.handle_new_state(__MODULE__, new_state)
 
-      @impl State.Server
+      @impl State.SqlServer
       def post_commit_hook, do: :ok
 
-      @impl State.Server
+      @impl State.SqlServer
       def post_load_hook(structs), do: structs
+
+      @impl State.SqlServer
+      def pre_insert_hook(item), do: [item]
 
       @impl Events.Server
       def handle_event({:fetch, unquote(opts[:fetched_filename])}, body, _, state) do
@@ -224,10 +228,10 @@ defmodule State.Server do
                      new_state: 2,
                      post_commit_hook: 0,
                      post_load_hook: 1,
+                     pre_insert_hook: 1,
                      select: 1,
                      select: 2,
                      select_limit: 2,
-                     shutdown: 2,
                      size: 0,
                      start_link: 0,
                      start_link: 1,
@@ -278,60 +282,53 @@ defmodule State.Server do
   end
 
   @spec match(module, map, atom, opts :: Keyword.t()) :: [struct]
-  def match(module, matcher, index, opts) when map_size(matcher) == 1 and is_atom(index) do
-    # if there's only one value for the matcher, then it's a simpler index read
-    %{^index => value} = matcher
-    by_index([value], module, {index, module.key_index()}, opts)
-  end
-
   def match(module, matcher, index, opts) when is_map(matcher) and is_atom(index) do
-    match = merge_with_filled(module, matcher)
-
-    by_index_match(match, module, index, opts)
+    select(module, [matcher], index, opts)
   end
 
-  def merge_with_filled(module, matcher) do
-    recordable = module.recordable()
+  def table_name(module) do
+    module
+    |> Atom.to_string()
+    |> String.replace("Elixir.", "")
+    |> String.replace(".", "_")
+  end
 
-    :_
-    |> recordable.filled()
-    |> Map.merge(matcher)
-    |> recordable.to_record()
+  def column_name(column) when is_atom(column) do
+    column
+    |> Atom.to_string()
+    |> String.replace("?", "_")
   end
 
   def recreate_table(module) do
+    table = table_name(module)
     recordable = module.recordable()
     indices = module.indices()
     attributes = recordable.fields()
-    key_index = module.key_index()
-    index = Enum.reject(indices, &Kernel.==(&1, key_index))
-    recreate_table(module, attributes: attributes, index: index, record_name: recordable)
+
+    columns = Enum.map_join(attributes, ", ", fn column -> ~s["#{column_name(column)}"] end)
+
+    {:ok, _} =
+      Sql.transaction(
+        Module.concat(module, Writer),
+        fn db ->
+          _ = Sql.query(db, "DROP TABLE IF EXISTS #{table}", [])
+          _ = Sql.query(db, "CREATE TABLE #{table} (_blob BLOB, #{columns})", [])
+
+          for index <- indices do
+            _ =
+              Sql.query(
+                db,
+                'CREATE INDEX IF NOT EXISTS #{table}__#{index} ON #{table} (#{column_name(index)})',
+                []
+              )
+          end
+        end
+      )
+
+    :ok
   end
 
-  def recreate_table(module, keywords) do
-    case :mnesia.create_table(
-           module,
-           record_name: Keyword.fetch!(keywords, :record_name),
-           attributes: Keyword.fetch!(keywords, :attributes),
-           index: Keyword.fetch!(keywords, :index),
-           storage_properties: [ets: [{:read_concurrency, true}]],
-           type: :bag,
-           local_content: true
-         ) do
-      {:atomic, :ok} ->
-        :mnesia.wait_for_tables([module], 5_000)
-
-      {:aborted, {:already_exists, _}} ->
-        {:atomic, :ok} = :mnesia.delete_table(module)
-        recreate_table(module, keywords)
-    end
-  end
-
-  def shutdown(module, _reason) do
-    {:atomic, :ok} = :mnesia.delete_table(module)
-  end
-
-  def create!(func, module) do
+  def create(func, module) do
     enum =
       debug_time(
         func,
@@ -341,191 +338,360 @@ defmodule State.Server do
       )
 
     if enum do
-      has_hook? = function_exported?(module, :pre_insert_hook, 1)
-
-      update =
-        case enum do
-          {:partial, enum} when has_hook? ->
-            {:partial, Stream.flat_map(enum, &module.pre_insert_hook/1)}
-
-          {:partial, _enum} = update ->
-            update
-
-          enum when has_hook? ->
-            {:all, Stream.flat_map(enum, &module.pre_insert_hook/1)}
-
-          enum ->
-            {:all, enum}
+      debug_time(
+        fn ->
+          create_children(enum, module)
+        end,
+        fn milliseconds ->
+          "create_children #{module} took #{milliseconds}ms"
         end
-
-      with {:atomic, count} <-
-             :mnesia.transaction(&create_children/2, [update, module], 10) do
-        {:ok, count}
-      end
+      )
     else
       {:ok, 0}
     end
   end
 
-  defp create_children({:all, enum}, module) do
+  defp create_children({:partial, enum}, module) do
+    table = table_name(module)
     recordable = module.recordable()
-    :mnesia.write_lock_table(module)
+    [key | _] = module.indices()
+    insert_sql_params = Enum.map_join(recordable.fields(), ", ", fn _ -> "?" end)
 
-    delete_all = fn ->
-      all_keys = :mnesia.all_keys(module)
-
-      :lists.foreach(&:mnesia.delete(module, &1, :write), all_keys)
-    end
-
-    write_new = fn ->
-      Enum.reduce(enum, 0, fn item, count ->
-        :mnesia.write(module, recordable.to_record(item), :write)
-        count + 1
+    groups =
+      enum
+      |> Enum.flat_map(&module.pre_insert_hook/1)
+      |> Enum.map(fn item ->
+        {Map.get(item, key),
+         [
+           {:blob, :erlang.term_to_binary(item)}
+           | item
+             |> recordable.to_list()
+             |> Enum.map(&bind_value/1)
+         ]}
       end)
-    end
+      |> Enum.group_by(&elem(&1, 0))
 
-    :ok =
-      debug_time(
-        delete_all,
-        fn milliseconds ->
-          "delete_all #{module} #{inspect(self())} took #{milliseconds}ms"
-        end
+    {:ok, counts} =
+      Sql.transaction(
+        Module.concat(module, Writer),
+        fn db ->
+          for {key_value, items} <- groups do
+            insert_group_params =
+              for _ <- items do
+                ["(?, ", insert_sql_params, ")"]
+              end
+              |> Enum.intersperse(", ")
+
+            {where, where_value} =
+              if key_value == nil do
+                {"IS NULL", []}
+              else
+                {" = ?", [bind_value(key_value)]}
+              end
+
+            _ =
+              Sql.query(
+                db,
+                ["DELETE FROM ", table, " WHERE ", column_name(key), where],
+                where_value
+              )
+
+            inserts = Enum.flat_map(items, fn {_, values} -> values end)
+
+            {:ok, _} =
+              Sql.query(
+                db,
+                ["INSERT INTO ", table, " VALUES ", insert_group_params],
+                inserts
+              )
+
+            length(items)
+          end
+        end,
+        timeout: 280_000
       )
 
-    count =
-      debug_time(
-        write_new,
-        fn milliseconds ->
-          "write_new #{module} #{inspect(self())} took #{milliseconds}ms"
-        end
-      )
-
-    count
+    {:ok, Enum.sum(counts)}
   end
 
-  defp create_children({:partial, enum}, module) do
+  defp create_children(enum, module) do
+    table = table_name(module)
     recordable = module.recordable()
-    key_index = module.key_index()
 
-    update = fn ->
+    insert_sql_params = Enum.map_join(recordable.fields(), ", ", fn _ -> "?" end)
+
+    chunk_size = div(32_000, length(recordable.fields()))
+
+    values =
       enum
-      |> Enum.group_by(&Map.get(&1, key_index))
-      |> Enum.reduce(0, fn {key, items}, count ->
-        :mnesia.delete(module, key, :write)
-        :lists.foreach(&:mnesia.write(module, recordable.to_record(&1), :write), items)
-        length(items) + count
+      |> Stream.flat_map(&module.pre_insert_hook/1)
+      |> Stream.map(fn item ->
+        [{:blob, :erlang.term_to_binary(item)}] ++
+          (item
+           |> recordable.to_list()
+           |> Enum.map(&bind_value/1))
       end)
-    end
 
-    count =
-      debug_time(
-        update,
-        fn milliseconds ->
-          "partial_update #{module} #{inspect(self())} took #{milliseconds}ms"
-        end
+    {:ok, counts} =
+      Sql.transaction(
+        Module.concat(module, Writer),
+        fn db ->
+          _ = Sql.query(db, ["DELETE FROM ", table], [])
+
+          for group <- Stream.chunk_every(values, chunk_size) do
+            insert_group_params =
+              for _ <- group do
+                ["(?, ", insert_sql_params, ")"]
+              end
+              |> Enum.intersperse(", ")
+
+            {:ok, _} =
+              Sql.query(
+                db,
+                ["INSERT INTO ", table, " VALUES ", insert_group_params],
+                List.flatten(group)
+              )
+
+            length(group)
+          end
+        end,
+        timeout: 280_000
       )
 
-    count
+    {:ok, Enum.sum(counts)}
+  end
+
+  defp bind_value(value) when is_integer(value) or is_binary(value) or is_nil(value) do
+    value
+  end
+
+  defp bind_value(value) do
+    {:blob, <<0>> <> :erlang.term_to_binary(value)}
+  end
+
+  defp unbind_value(<<first::binary-1, _::binary>> = value) when first != <<0>> do
+    value
+  end
+
+  defp unbind_value("" = value) do
+    value
+  end
+
+  defp unbind_value(value) when is_integer(value) or is_nil(value) do
+    value
+  end
+
+  defp unbind_value(<<0>> <> value) do
+    :erlang.binary_to_term(value)
   end
 
   def size(module) do
-    :mnesia.table_info(module, :size)
-  end
-
-  def all(module, opts) do
-    module
-    |> :ets.tab2list()
-    |> to_structs(module, opts)
-  rescue
-    ArgumentError ->
-      # if the table is being rebuilt, we re-try to get the data
-      all(module, opts)
-  end
-
-  def all_keys(module) do
-    :mnesia.ets(fn ->
-      :mnesia.all_keys(module)
+    Sql.run(Module.concat(module, Reader), fn db ->
+      {:ok, result} = Sql.query(db, ["SELECT COUNT(*) FROM ", table_name(module)], [])
+      [[count]] = result.rows
+      count
     end)
   end
 
-  def by_index(values, module, indices, opts) do
-    indices
-    |> build_read_fun(module)
-    |> :lists.flatmap(values)
-    |> to_structs(module, opts)
-  catch
-    :exit, {:aborted, {_, [^module | _]}} ->
-      by_index(values, module, indices, opts)
+  def all(module, opts) do
+    Sql.run(Module.concat(module, Reader), fn db ->
+      result = Sql.stream(db, ["SELECT _blob FROM ", table_name(module)], [])
+      to_structs(result, module, opts)
+    end)
   end
 
-  defp build_read_fun({key_index, key_index}, module) do
-    &:mnesia.dirty_read(module, &1)
+  def all_keys(module) do
+    [first_key | _] = module.recordable().fields()
+
+    Sql.run(Module.concat(module, Reader), fn db ->
+      result =
+        Sql.stream(
+          db,
+          ["SELECT DISTINCT ", column_name(first_key), " FROM ", table_name(module)],
+          []
+        )
+
+      result
+      |> Enum.flat_map(&unwrap_result/1)
+      |> Enum.map(fn [value] -> unbind_value(value) end)
+    end)
   end
 
-  defp build_read_fun({index, _key_index}, module) do
-    &:mnesia.dirty_index_read(module, &1, index)
+  def by_index(values, module, indicies, opts)
+
+  def by_index([], _module, _indicies, _opts) do
+    []
   end
 
-  def by_index_match(match, module, index, opts) do
-    module
-    |> :mnesia.dirty_index_match_object(match, index)
-    |> to_structs(module, opts)
+  def by_index([nil], module, index, opts) do
+    Sql.run(Module.concat(module, Reader), fn db ->
+      column = column_name(index)
+
+      {:ok, result} =
+        Sql.query(
+          db,
+          ["SELECT _blob FROM ", table_name(module), " WHERE ", column, " IS NULL"],
+          []
+        )
+
+      to_structs(result.rows, module, opts)
+    end)
   end
 
-  def matchers_to_selectors(module, matchers) do
-    for matcher <- matchers do
-      {merge_with_filled(module, matcher), [], [:"$_"]}
-    end
+  def by_index([value], module, index, opts) do
+    Sql.run(Module.concat(module, Reader), fn db ->
+      column = column_name(index)
+      value = bind_value(value)
+
+      {:ok, result} =
+        Sql.query(db, ["SELECT _blob FROM ", table_name(module), " WHERE ", column, " = ?"], [
+          value
+        ])
+
+      to_structs(result.rows, module, opts)
+    end)
   end
 
-  @spec select(module, [map], atom | nil) :: [struct]
-  def select(module, matchers, index \\ nil)
+  def by_index(values, module, index, opts) do
+    Sql.run(Module.concat(module, Reader), fn db ->
+      column = column_name(index)
 
-  def select(module, matchers, nil) when is_list(matchers) do
-    selectors = matchers_to_selectors(module, matchers)
-    select_with_selectors(module, selectors)
+      wheres =
+        for value <- values do
+          if is_nil(value) do
+            [column, " IS NULL"]
+          else
+            [column, " = ?"]
+          end
+        end
+        |> Enum.intersperse(" OR ")
+
+      where_values = Enum.reject(values, &is_nil/1)
+
+      {order_by, order_by_values} =
+        case values do
+          [] ->
+            {[], []}
+
+          [_] ->
+            {[], []}
+
+          [_ | _] ->
+            order_by = [
+              " ORDER BY CASE ",
+              column,
+              values
+              |> Enum.with_index()
+              |> Enum.map(fn {_, i} ->
+                [" WHEN ? THEN ", Integer.to_string(i)]
+              end),
+              " END"
+            ]
+
+            {order_by, values}
+        end
+
+      result =
+        Sql.stream(
+          db,
+          ["SELECT _blob FROM ", table_name(module), " WHERE ", wheres, order_by],
+          Enum.map(where_values ++ order_by_values, &bind_value/1)
+        )
+
+      to_structs(result, module, opts)
+    end)
   end
 
-  def select(module, [matcher], index) when is_atom(index) do
-    module.match(matcher, index)
+  @spec select(module, [map], atom | nil, Keyword.t()) :: [struct]
+  def select(module, matchers, index \\ nil, opts \\ [])
+
+  def select(_module, [], _index, _opts) do
+    []
   end
 
-  def select(module, matchers, index) when is_list(matchers) and is_atom(index) do
-    :lists.flatmap(&module.match(&1, index), matchers)
+  def select(module, matchers, index, opts) when is_list(matchers) and is_atom(index) do
+    Sql.run(Module.concat(module, Reader), fn db ->
+      {wheres, values} = where_query(matchers)
+
+      result =
+        Sql.stream(
+          db,
+          ["SELECT _blob FROM ", table_name(module), " WHERE ", wheres],
+          Enum.map(values, &bind_value/1)
+        )
+
+      to_structs(result, module, opts)
+    end)
   end
 
-  def select_with_selectors(module, selectors) when is_atom(module) and is_list(selectors) do
-    fn ->
-      :mnesia.select(module, selectors)
-    end
-    |> :mnesia.async_dirty()
-    |> to_structs(module, [])
+  def select_limit(module, matchers, num_objects, opts \\ [])
+
+  def select_limit(_module, [], num_objects, _opts) when is_integer(num_objects) do
+    []
   end
 
-  def select_limit(module, matchers, num_objects) do
-    selectors = matchers_to_selectors(module, matchers)
-    select_limit_with_selectors(module, selectors, num_objects)
+  def select_limit(module, matchers, num_objects, opts) when is_integer(num_objects) do
+    Sql.run(Module.concat(module, Reader), fn db ->
+      {wheres, values} = where_query(matchers)
+
+      result =
+        Sql.stream(
+          db,
+          ["SELECT _blob FROM ", table_name(module), " WHERE ", wheres, "LIMIT ?"],
+          Enum.map(values, &bind_value/1) ++ [num_objects]
+        )
+
+      to_structs(result, module, opts)
+    end)
   end
 
-  def select_limit_with_selectors(module, selectors, num_objects) do
-    case :mnesia.async_dirty(fn ->
-           :mnesia.select(module, selectors, num_objects, :read)
-         end) do
-      :"$end_of_table" ->
-        []
+  defp where_query(matchers) do
+    {wheres, where_values} =
+      Enum.reduce(matchers, {[], []}, fn matcher, {wheres, where_values} ->
+        if matcher == %{} do
+          {["1" | wheres], where_values}
+        else
+          where =
+            for {index, value} <- matcher do
+              if is_nil(value) do
+                [column_name(index), " IS NULL"]
+              else
+                [column_name(index), "= ?"]
+              end
+            end
+            |> Enum.intersperse(" AND ")
 
-      {records, _cont} ->
-        to_structs(records, module, [])
-    end
+          values =
+            Enum.flat_map(matcher, fn {_index, value} ->
+              if is_nil(value), do: [], else: [value]
+            end)
+
+          {[["(", where, ")"] | wheres], values ++ where_values}
+        end
+      end)
+
+    {Enum.intersperse(wheres, " OR "), where_values}
   end
 
   defp to_structs(records, module, opts) do
-    recordable = module.recordable()
+    # recordable = module.recordable()
 
     records
-    |> Enum.map(&recordable.from_record/1)
+    |> Enum.flat_map(&unwrap_result/1)
+    |> Enum.map(fn [value] ->
+      # recordable.from_list(Enum.map(values, &unbind_value/1))
+      :erlang.binary_to_term(value)
+    end)
     |> module.post_load_hook()
     |> State.all(opts)
+  end
+
+  defp unwrap_result(%Exqlite.Result{rows: rows}) do
+    rows
+  end
+
+  defp unwrap_result(other) do
+    [other]
   end
 
   def log_parse_error(module, e) do
@@ -534,18 +700,17 @@ defmodule State.Server do
     nil
   end
 
-  defp def_by_index(index, keywords) do
-    key_index = Keyword.fetch!(keywords, :key_index)
+  defp def_by_index(index) do
     name = :"by_#{index}"
     plural_name = :"#{name}s"
 
     quote do
       def unquote(name)(value, opts \\ []) do
-        Server.by_index([value], __MODULE__, {unquote(index), unquote(key_index)}, opts)
+        Server.by_index([value], __MODULE__, unquote(index), opts)
       end
 
       def unquote(plural_name)(values, opts \\ []) when is_list(values) do
-        Server.by_index(values, __MODULE__, {unquote(index), unquote(key_index)}, [])
+        Server.by_index(values, __MODULE__, unquote(index), [])
       end
 
       defoverridable [
@@ -557,18 +722,16 @@ defmodule State.Server do
     end
   end
 
-  def def_by_indices(indices, keywords) do
-    key_index = Keyword.fetch!(keywords, :key_index)
-
+  def def_by_indices(indices) do
     for index <- indices do
-      def_by_index(index, key_index: key_index)
+      def_by_index(index)
     end
   end
 
   defp do_handle_new_state(module, func) do
-    {:ok, update_count} =
+    {:ok, new_size} =
       debug_time(
-        fn -> create!(func, module) end,
+        fn -> create(func, module) end,
         fn milliseconds ->
           "init_table #{module} #{inspect(self())} took #{milliseconds}ms"
         end
@@ -586,11 +749,11 @@ defmodule State.Server do
 
     _ =
       Logger.info(fn ->
-        "Update #{module} #{inspect(self())}: #{update_count} items"
+        "Update #{module} #{inspect(self())}: #{new_size} items"
       end)
 
     module.update_metadata()
-    Events.publish({:new_state, module}, update_count)
+    Events.publish({:new_state, module}, module.size())
 
     :ok
   end
