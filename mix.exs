@@ -63,7 +63,7 @@ defmodule ApiUmbrella.Mixfile do
       {:lcov_ex, "~> 0.2", only: [:dev, :test], runtime: false},
       {:mix_audit, "~> 2.0", only: [:dev], runtime: false},
       # Generate docs with `mix docs`
-      {:ex_doc, "~> 0.20", only: [:dev, :test], runtime: false}
+      {:ex_doc, "~> 0.32", only: [:dev, :test], runtime: false}
     ]
   end
 
