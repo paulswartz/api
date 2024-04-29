@@ -308,6 +308,20 @@ files = [
 Flask = "*"
 
 [[package]]
+name = "flask-cors"
+version = "4.0.0"
+description = "A Flask extension adding a decorator for CORS support"
+optional = false
+python-versions = "*"
+files = [
+    {file = "Flask-Cors-4.0.0.tar.gz", hash = "sha256:f268522fcb2f73e2ecdde1ef45e2fd5c71cc48fe03cffb4b441c6d1b40684eb0"},
+    {file = "Flask_Cors-4.0.0-py2.py3-none-any.whl", hash = "sha256:bc3492bfd6368d27cfe79c7821df5a8a319e1a6d5eab277a3794be19bdc51783"},
+]
+
+[package.dependencies]
+Flask = ">=0.9"
+
+[[package]]
 name = "gevent"
 version = "21.1.2"
 description = "Coroutine-based network library"
@@ -525,19 +539,20 @@ i18n = ["Babel (>=2.7)"]
 
 [[package]]
 name = "locust"
-version = "1.5.3"
+version = "1.6.0"
 description = "Developer friendly load testing framework"
 optional = false
 python-versions = ">=3.6"
 files = [
-    {file = "locust-1.5.3-py3-none-any.whl", hash = "sha256:c701c411e7e49905baf7d0a56cb8eb91f72e3494ddc61c18fefeb593b204f789"},
-    {file = "locust-1.5.3.tar.gz", hash = "sha256:0b96e668a51ca6806dfd02edb7f1f5e72151b290a3f8adfcde30e8d6fbc8457f"},
+    {file = "locust-1.6.0-py3-none-any.whl", hash = "sha256:28e4846d1ac14b88a4f29641d7306108dc652964331bdb57cd2991a6140b0515"},
+    {file = "locust-1.6.0.tar.gz", hash = "sha256:95715ed82173d77a338bd91af01814ad2a199ed076880a720c3bc95462b796b3"},
 ]
 
 [package.dependencies]
 ConfigArgParse = ">=1.0"
 flask = "1.1.2"
 Flask-BasicAuth = ">=0.2.0"
+Flask-Cors = ">=3.0.10"
 gevent = ">=20.9.0"
 geventhttpclient = ">=1.4.4"
 msgpack = ">=0.6.2"
