@@ -16,7 +16,7 @@ jobs:
       ECS_SERVICE: api-dev-green
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: mbta/actions/build-push-ecr@v2
         id: build-push
         with:
