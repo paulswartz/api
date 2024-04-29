@@ -9,6 +9,7 @@ on:
 jobs:
   call-workflow:
     uses: mbta/workflows/.github/workflows/asana.yml@main
+    if: github.repository_owner == 'mbta'
     with:
       development-section: "In Development"
       review-section: "Pending Review"
