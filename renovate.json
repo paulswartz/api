@@ -2,5 +2,21 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "customManagers": [
+    {
+      "fileMatch": ".tool-versions",
+      "matchStrings": ["elixir (?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "elixir",
+      "datasourceTemplate": "hexpm-bob"
+    },
+    {
+      "fileMatch": ".tool-versions",
+      "matchStrings": ["-otp-(?<currentValue>\\d+)"],
+      "extractVersionTemplate": "^(?<version>\\d+)",
+      "depNameTemplate": "erlang/otp",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "loose"
+    }
   ]
 }
