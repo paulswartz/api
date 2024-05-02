@@ -7,7 +7,7 @@ authors = ["Ian Westcott <iwestcott@mbta.com>"]
 [tool.poetry.dependencies]
 python = "^3.9"
 locust = "^1.5.3"
-flake8 = "^3.9.2"
+flake8 = "^7.0.0"
 black = "^24.3"
 
 [tool.poetry.dev-dependencies]
