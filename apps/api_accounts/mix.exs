@@ -58,7 +58,7 @@ defmodule ApiAccounts.Mixfile do
       {:bcrypt_elixir, "~> 2.0"},
       {:uuid, "~> 1.1"},
       {:bamboo, "~> 1.0"},
-      {:bamboo_ses, "~> 0.1.0"},
+      {:bamboo_ses, "~> 0.4.0"},
       {:email_checker, "~> 0.2.4"},
       {:nimble_totp, "~> 1.0"}
     ]
