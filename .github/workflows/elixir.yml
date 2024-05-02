@@ -51,7 +51,7 @@ jobs:
           path: ~/.asdf
           key: ${{ runner.os }}-asdf-v3-${{ hashFiles('.tool-versions') }}
         if: steps.deps-cache.outputs.cache-hit != 'true'
-      - uses: mbta/actions/reshim-asdf@v1
+      - uses: mbta/actions/reshim-asdf@v2
         if: steps.deps-cache.outputs.cache-hit != 'true'
       - name: Install dependencies
         run: mix deps.get
@@ -69,7 +69,7 @@ jobs:
         with:
           path: ~/.asdf
           key: ${{ runner.os }}-asdf-v3-${{ hashFiles('.tool-versions') }}
-      - uses: mbta/actions/reshim-asdf@v1
+      - uses: mbta/actions/reshim-asdf@v2
       - name: Restore dependencies cache
         id: deps-cache
         uses: actions/cache@v4
@@ -108,14 +108,14 @@ jobs:
         with:
           path: ~/.asdf
           key: ${{ runner.os }}-asdf-v3-${{ hashFiles('.tool-versions') }}
-      - uses: mbta/actions/reshim-asdf@v1
+      - uses: mbta/actions/reshim-asdf@v2
       - name: Restore dependencies cache
         id: deps-cache
         uses: actions/cache@v4
         with:
           path: deps
           key: ${{ runner.os }}-mix-v2-${{ hashFiles('**/mix.lock') }}
-      - uses: mbta/actions/dialyzer@v1
+      - uses: mbta/actions/dialyzer@v2
 
   test:
     name: Test Tasks
@@ -144,7 +144,7 @@ jobs:
         with:
           path: ~/.asdf
           key: ${{ runner.os }}-asdf-v3-${{ hashFiles('.tool-versions') }}
-      - uses: mbta/actions/reshim-asdf@v1
+      - uses: mbta/actions/reshim-asdf@v2
       - name: Restore dependencies cache
         id: deps-cache
         uses: actions/cache@v4
