@@ -19,10 +19,10 @@ jobs:
       - run: mkdir -p ${{ runner.temp }}/cover
       - run: echo Fetching artifacts for ${{ github.event.workflow_run.id }}, event name ${{ github.event_name }}, triggered by ${{ github.event.workflow_run.event }}
       - name: Download artifact
-        uses: actions/github-script@v3.1.0
+        uses: actions/github-script@v7.0.1
         with:
           script: |
-            var artifacts = await github.actions.listWorkflowRunArtifacts({
+            var artifacts = await github.rest.actions.listWorkflowRunArtifacts({
               owner: context.repo.owner,
               repo: context.repo.repo,
               run_id: ${{github.event.workflow_run.id }},
@@ -30,7 +30,7 @@ jobs:
             var matchArtifact = artifacts.data.artifacts.filter((artifact) => {
               return artifact.name == "elixir-lcov"
             })[0];
-            var download = await github.actions.downloadArtifact({
+            var download = await github.rest.actions.downloadArtifact({
               owner: context.repo.owner,
               repo: context.repo.repo,
               artifact_id: matchArtifact.id,
@@ -43,12 +43,13 @@ jobs:
           unzip elixir-lcov.zip
           echo "PR_SHA=$(cat PR_SHA)" >> $GITHUB_ENV
           echo "PR_NUMBER=$(cat PR_NUMBER)" >> $GITHUB_ENV
-      - uses: actions/checkout@v2 # UNTRUSTED CODE - do not run scripts from it
+      - uses: actions/checkout@v4 # UNTRUSTED CODE - do not run scripts from it
         with:
           ref: ${{ env.PR_SHA }}
       - name: Upload coverage artifact and post comment
-        uses: mbta/github-actions-report-lcov@v1
+        uses: zgosalvez/github-actions-report-lcov@v4
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           coverage-files: ${{ runner.temp }}/cover/lcov*.info
           artifact-name: elixir-code-coverage
+          update-comment: true
