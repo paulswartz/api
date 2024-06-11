@@ -5,7 +5,7 @@ on:
     - cron: '0 5 * * *'
   push:
     branches: master
-  pull_request:
+  pull_request_target:
   workflow_dispatch:
 
 concurrency:
@@ -162,14 +162,11 @@ jobs:
       - name: Run integration tests
         working-directory: apps/state_mediator
         run: mix test --only integration
-      - name: Save PR information
-        run: |
-          mkdir -p cover
-          echo "${{ github.event.pull_request.number }}" > cover/PR_NUMBER
-          echo "${{ github.event.pull_request.head.sha }}" > cover/PR_SHA
-        if: github.event.pull_request
-      - name: Upload coverage artifact
-        uses: actions/upload-artifact@v3
+      - uses: hrishikesh-kadam/setup-lcov@v1
+      - name: Upload coverage artifact and post comment
+        uses: zgosalvez/github-actions-report-lcov@v4
         with:
-          name: elixir-lcov
-          path: cover/
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          coverage-files: cover/lcov*.info
+          artifact-name: elixir-code-coverage
+          update-comment: true
