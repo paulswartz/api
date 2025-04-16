@@ -81,7 +81,7 @@ defmodule ApiWeb.Mixfile do
       {:diskusage_logger, "~> 0.2", only: :prod},
       {:jason, "~> 1.4"},
       {:stream_data, "~> 0.6", only: :test},
-      {:sobelow, "~> 0.11", only: :dev, runtime: false},
+      {:sobelow, "~> 0.13", only: :dev, runtime: false},
       {:recaptcha, git: "https://github.com/samueljseay/recaptcha.git", tag: "71cd746"},
       {:sentry, "~> 8.0"},
       {:qr_code, "~> 3.0"},
